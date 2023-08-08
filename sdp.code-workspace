@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../lib/bop_toolkit"
+		},
+		{
+			"path": "../lib/bop_renderer"
+		}
+	],
+	"settings": {}
+}

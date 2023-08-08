@@ -1,0 +1,8 @@
+
+jupyter
+matplotlib
+numpy
+pandas
+pydantic-cli
+scipy
+
