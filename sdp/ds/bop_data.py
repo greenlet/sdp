@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from imageio.v3 import imread
+
 from sdp.utils.data import read_json
 
 
@@ -148,4 +150,24 @@ def read_scene_gt_info(scene_gt_info_fpath: Path) -> BopSceneGtInfo:
         scene_gt_info[scene_id] = scene_objs_gt_info
     return scene_gt_info
 
+
+def id_to_str(id_: int) -> str:
+    return f'{id_:06d}'
+
+
+def read_img(data_path: Path, scene_id: int, img_id: int) -> np.ndarray:
+    fpath = data_path / id_to_str(scene_id) / 'rgb' / f'{id_to_str(img_id)}.jpg'
+    return imread(fpath)
+
+
+def read_masks(data_path: Path, scene_id: int, masks_subdir: str, img_id: int, n_objs: int) -> list[np.ndarray]:
+    masks_path = data_path / id_to_str(scene_id) / masks_subdir
+    img_id_str = id_to_str(img_id)
+    res = []
+    for i in range(n_objs):
+        obj_id_str = id_to_str(i)
+        mask_fpath = masks_path / f'{img_id_str}_{obj_id_str}.png'
+        mask = imread(mask_fpath)
+        res.append(mask)
+    return res
 
