@@ -1,7 +1,7 @@
 import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 from imageio.v3 import imread
 
@@ -15,8 +15,8 @@ class BopSymmetryContinuous:
 
 
 @dataclass
-class BopModelsInfo:
-    id: int
+class BopModelInfo:
+    model_id: int
     diameter: float
     pt_min: np.ndarray
     pt_max: np.ndarray
@@ -25,7 +25,8 @@ class BopModelsInfo:
     syms_continuous: list[BopSymmetryContinuous]
 
     @staticmethod
-    def from_json(id: int, data: dict[str, Any]) -> 'BopModelsInfo':
+    def from_json(model_id: Union[int, str], data: dict[str, Any]) -> 'BopModelInfo':
+        model_id = int(model_id)
         diameter = data['diameter']
         pt_min = np.array([data['min_x'], data['min_y'], data['min_z']], dtype=float)
         pt_max = np.array([data['max_x'], data['max_y'], data['max_z']], dtype=float)
@@ -42,15 +43,17 @@ class BopModelsInfo:
             sc = BopSymmetryContinuous(axis, offset)
             syms_continuous.append(sc)
         syms_continuous = syms_continuous
-        return BopModelsInfo(
-            id=id, diameter=diameter, pt_min=pt_min, pt_max=pt_max, size=size,
+        return BopModelInfo(
+            model_id=model_id, diameter=diameter, pt_min=pt_min, pt_max=pt_max, size=size,
             syms_discrete=syms_discrete, syms_continuous=syms_continuous,
         )
 
 
-def read_models_info(models_info_fpath: Path) -> dict[int, BopModelsInfo]:
+BopModelsInfo = dict[int, BopModelInfo]
+
+def read_models_info(models_info_fpath: Path) -> BopModelsInfo:
     data = read_json(models_info_fpath)
-    return {int(k): BopModelsInfo.from_json(k, v) for k, v in data.items()}
+    return {int(k): BopModelInfo.from_json(k, v) for k, v in data.items()}
 
 
 @dataclass

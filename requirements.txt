@@ -1,10 +1,14 @@
 
+glfw
 imageio
 imgaug
 jupyter
 matplotlib
 numpy
+opencv-python
 pandas
 pydantic-cli
+PyOpenGL
+PyOpenGL_accelerate
 scipy
 
