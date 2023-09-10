@@ -7,18 +7,20 @@ import open3d as o3d
 
 class Mesh:
     mesh_o3d: o3d.geometry.TriangleMesh
+    mul_to_meters: float = 1.0
     _vertices: Optional[np.ndarray] = None
     _triangles: Optional[np.ndarray] = None
     _triangle_normals: Optional[np.ndarray] = None
     _vertex_normals: Optional[np.ndarray] = None
 
-    def __init__(self, mesh_o3d: o3d.geometry.TriangleMesh):
+    def __init__(self, mesh_o3d: o3d.geometry.TriangleMesh, mul_to_meters: float = 1.0):
         self.mesh_o3d = mesh_o3d
+        self.mul_to_meters = mul_to_meters
 
     @property
     def vertices(self) -> np.ndarray:
         if self._vertices is None:
-            self._vertices = np.asarray(self.mesh_o3d.vertices)
+            self._vertices = np.asarray(self.mesh_o3d.vertices) * self.mul_to_meters
         return self._vertices
 
     @property
@@ -42,8 +44,8 @@ class Mesh:
         return self._triangle_normals
 
     @staticmethod
-    def read_mesh(fpath: Path) -> 'Mesh':
+    def read_mesh(fpath: Path, mul_to_meters: float = 1.0) -> 'Mesh':
         mesh_o3d = o3d.io.read_triangle_mesh(str(fpath))
-        return Mesh(mesh_o3d)
+        return Mesh(mesh_o3d, mul_to_meters)
 
 

@@ -44,6 +44,45 @@ def calc_proj_mat(width: int, height: int, focus: float, n: float = 0.01, f: flo
     return res.astype(np.float32)
 
 
+def calc_proj_mat_2(width: int, height: int, cam_mat: np.ndarray, n: float = 0.01, f: float = 10.0) \
+        -> tuple[tuple[int, int], tuple[int, int], np.ndarray]:
+    fx, fy = cam_mat[0, 0], cam_mat[1, 1]
+    cx, cy = cam_mat[:2, 2]
+    cxx, cyy = width - cx, height - cy
+    if cx > cxx:
+        ww = np.ceil(2 * cx).astype(int)
+        off_x = 0
+    else:
+        ww = np.ceil(2 * cxx).astype(int)
+        off_x = ww - width
+    if cy > cyy:
+        hh = np.ceil(2 * cy).astype(int)
+        off_y = 0
+    else:
+        hh = np.ceil(2 * cyy).astype(int)
+        off_y = hh - height
+
+    rx, ry = n / fx, n / fy
+    l, r = -ww / 2 * rx, ww / 2 * rx
+    b, t = -hh / 2 * ry, hh / 2 * ry
+    res = np.array([
+        [2 * n / (r - l), 0, (r + l) / (r - l), 0],
+        [0, 2 * n / (t - b), (t + b) / (t - b), 0],
+        [0, 0, -(f + n) / (f - n), -2 * f * n / (f - n)],
+        [0, 0, -1, 0],
+    ])
+    return (off_x, off_y), (ww, hh), res.astype(np.float32)
+
+
+def all_close_opt(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> bool:
+    an, bn = a is None, b is None
+    if an:
+        return bn
+    if bn:
+        return False
+    return np.allclose(a, b)
+
+
 class ProgContainer:
     def __init__(self):
         self.vertex_shader = shaders.compileShader("""
@@ -199,10 +238,11 @@ class MeshObj:
 
 
 class Renderer:
-    width: int
-    height: int
+    img_size: Tuple[int, int]
     title: str
     hide_window: bool
+    proj_off: tuple[int, int]
+    proj_size: tuple[int, int]
     proj_mat: np.ndarray
     cam_mat: np.ndarray
     window: Any
@@ -210,17 +250,19 @@ class Renderer:
     mesh_objs: Dict[Any, MeshObj]
     cv_to_opengl_mat: np.ndarray
 
-    def __init__(self, meshes: Dict[Any, Mesh], win_size: Tuple[int, int] = (640, 480), title: str = 'Renderer',
+    def __init__(self, meshes: Dict[Any, Mesh], img_size: Tuple[int, int] = (640, 480), title: str = 'Renderer',
                  hide_window: bool = False):
-        self.width, self.height = win_size
-        self.title = title
-        self.hide_window = hide_window
-        self.proj_mat = calc_proj_mat(self.width, self.height, self.width)
+        self.img_size = img_size
+        # self.cam_mat = np.empty((3, 3), dtype=float)
         self.cam_mat = np.array([
-            self.width, 0, self.width / 2,
-            0, self.width, self.height / 2,
+            self.img_size[0], 0, self.img_size[0] / 2,
+            0, self.img_size[1], self.img_size[1] / 2,
             0, 0, 1.,
         ]).reshape((3, 3))
+        self.proj_off = 0
+        self.proj_size = self.img_size
+        self.title = title
+        self.hide_window = hide_window
 
         if not glfw.init():
             raise Exception(f'Error. Cannot init GLFW!')
@@ -230,9 +272,9 @@ class Renderer:
         glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, GL_TRUE)
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
 
-        self.window = glfw.create_window(self.width, self.height, self.title, None, None)
+        self.window = glfw.create_window(self.img_size[0], self.img_size[1], self.title, None, None)
         if not self.window:
-            raise Exception(f'Error. Cannot create window of size: {self.width}x{self.height}')
+            raise Exception(f'Error. Cannot create window of size: {self.img_size}')
         glfw.make_context_current(self.window)
         if self.hide_window:
             glfw.hide_window(self.window)
@@ -264,36 +306,28 @@ class Renderer:
     def create_mesh_objs(meshes: Dict[Any, Mesh], prog: ProgContainer) -> Dict[Any, MeshObj]:
         return {mid: MeshObj(mesh.vertices, mesh.vertex_normals, mesh.triangles, prog) for mid, mesh in meshes.items()}
 
-    def set_window_size(self, win_size: Tuple[int, int]):
-        width, height = win_size
-        if (self.width, self.height) == (width, height):
+    def set_intrinsics(self, img_size: Optional[Tuple[int, int]] = None, cam_mat: Optional[np.ndarray] = None):
+        if img_size is None:
+            img_size = self.img_size
+        if cam_mat is None:
+            cam_mat = self.cam_mat
+        if self.img_size == img_size and all_close_opt(self.cam_mat, cam_mat):
             return
-        self.width, self.height = width, height
-        self.proj_mat = calc_proj_mat(self.width, self.height, self.cam_mat[0, 0])
-        glfw.set_window_size(self.window, self.width, self.height)
-        glViewport(0, 0, self.width, self.height)
+
+        self.img_size = img_size
+        self.cam_mat = cam_mat
+        self.proj_off, self.proj_size, self.proj_mat = \
+            calc_proj_mat_2(self.img_size[0], self.img_size[1], self.cam_mat)
+
+        glfw.set_window_size(self.window, *self.proj_size)
+        # glViewport(0, 0, *self.proj_size)
         for _ in range(2):
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             glfw.swap_buffers(self.window)
 
-    def set_camera_matrix(self, cam_mat: np.ndarray):
-        if self.cam_mat is not None and np.allclose(self.cam_mat, cam_mat):
-            return
-        self.cam_mat = cam_mat.astype(np.float32)
-        self.proj_mat = calc_proj_mat(self.width, self.height, self.cam_mat[0, 0])
-        # fovy_half_tan = (self.height / 2) / self.cam_mat[1, 1]
-        # fovy = np.arctan(fovy_half_tan) * 2 * (180 / np.pi)
-
-        # print(f'Fov y: {fovy:.2f}')
-        # glMatrixMode(GL_PROJECTION)
-        # glLoadIdentity()
-        # gluPerspective(fovy, self.width / self.height, 0.01, 10)
-        # glMatrixMode(GL_MODELVIEW)
-        # glLoadIdentity()
-
     def gen_colors(self, cam_mat: np.ndarray, objs_poses: List[Tuple[Any, np.ndarray]], out_type: OutputType,
                    obj_color: Optional[Color4i] = None) -> np.ndarray:
-        self.set_camera_matrix(cam_mat)
+        self.set_intrinsics(cam_mat=cam_mat)
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
@@ -304,12 +338,25 @@ class Renderer:
             mesh_obj.draw(self.proj_mat, obj_cam_mat, out_type, obj_color)
 
         image_type = GL_RGBA if out_type == OutputType.Overlay else GL_RGB
-        width, height = glfw.get_framebuffer_size(self.window)
-        image_buffer = glReadPixels(0, 0, width, height, image_type, GL_UNSIGNED_BYTE)
-        image = np.frombuffer(image_buffer, dtype=np.uint8).reshape((height, width, -1))
-        if width != self.width or height != self.height:
-            image = cv2.resize(image, (self.width, self.height), interpolation=cv2.INTER_AREA)
+        fb_size = glfw.get_framebuffer_size(self.window)
+        # print(f'Frame buffer size: {fb_size}. Proj size: {self.proj_size}. off: {self.proj_off}')
+        image_buffer = glReadPixels(0, 0, fb_size[0], fb_size[1], image_type, GL_UNSIGNED_BYTE)
+        image = np.frombuffer(image_buffer, dtype=np.uint8).reshape((fb_size[1], fb_size[0], -1))
+
+        # On Retina Display fb_size = 2 * self.proj_size
+        # assert fb_size == self.proj_size
+        if fb_size != self.proj_size:
+            assert fb_size[0] // self.proj_size[0] == fb_size[1] // self.proj_size[1],\
+                f'Frame buffer size {fb_size} is not divided by proj_size {self.proj_size} with a constant'
+            image = cv2.resize(image, self.proj_size, interpolation=cv2.INTER_AREA)
+
+        off_x, off_y = self.proj_off
         image = cv2.flip(image, 0)
+        if off_x > 0 or off_y > 0 or self.img_size != self.proj_size:
+            # print(f'Extracting proj_size {self.img_size}, proj_off {self.proj_off} from image of '
+            #       f'shape: {image.shape[1], image.shape[0]}')
+            w, h = self.img_size
+            image = image[off_y:off_y + h, off_x:off_x + w]
 
         glfw.swap_buffers(self.window)
 
@@ -332,23 +379,23 @@ def gen_rot_vec() -> Tuple[np.ndarray, float]:
 def test_renderer():
     data_path = Path(os.path.expandvars('$HOME/data'))
     # data_path = Path(os.path.expandvars('/ws/data'))
-    obj_path = data_path / 'sds_data/objs/teamug.stl'
-    # obj_path = data_path / 'sds/itodd/models/obj_000004.ply'
+    # obj_path, mul_to_meters = data_path / 'sds_data/objs/teamug.stl', 1.0
+    obj_path, mul_to_meters = data_path / 'bop/itodd/models/obj_000004.ply', 1e-3
     print(f'Loading {obj_path}')
-    mesh = Mesh.read_mesh(obj_path)
+    mesh = Mesh.read_mesh(obj_path, mul_to_meters)
     mesh_id = 'teamug'
     meshes = {mesh_id: mesh}
 
     w, h = 640, 480
     w, h = 2048, 2048
     cam_mat = np.array([
-        w / 2, 0., w / 2,
-        0, w / 2, h / 2,
+        w / 2, 0., w / 2 - 10,
+        0, w / 2, h / 2 + 10,
         0, 0, 1,
     ]).reshape((3, 3))
 
     ren = Renderer(meshes, (w, h), hide_window=True)
-    ren.set_camera_matrix(cam_mat)
+    ren.set_intrinsics(cam_mat=cam_mat)
 
     np.random.seed(1)
     pos_center = np.array((0., 0., 1.))

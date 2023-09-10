@@ -17,12 +17,20 @@ from sdp.ds.batch_processor import BatchProcessor
 from sdp.ds.bop_data import read_scene_camera, read_scene_gt, read_scene_gt_info, id_to_str
 from sdp.utils.data import read_yaml, write_yaml
 
+MAP_NORM_NAME = 'norm'
+MAP_NOC_NAME = 'noc'
 SplitsType = Union[int, list[int], float, list[float]]
-IdsType = Union[int, list[int], np.ndarray, range]
+IndsList = Union[list[int], np.ndarray, slice]
+IdsType = Union[int, IndsList]
+ImgsList = list[np.ndarray]
+MapsDict = dict[str, ImgsList]
 
 
-def get_img_fpath(scene_path: Path, img_id_str: str) -> Path:
-    return scene_path / 'rgb' / f'{img_id_str}.jpg'
+def get_img_fpath(scene_path: Path, img_id_str: str, dir_sfx: str = '', ext='jpg') -> Path:
+    dir_name = 'rgb'
+    if dir_sfx:
+        dir_name = f'{dir_name}_{dir_sfx}'
+    return scene_path / dir_name / f'{img_id_str}.{ext}'
 
 
 def get_mask_visib_fpath(scene_path: Path, img_id_str: str, obj_ind: int) -> Path:
@@ -89,82 +97,116 @@ def split_range(n: int, splits: SplitsType) -> list[int]:
 
 
 class ImgsMasksCrop:
-    imgs_crop: list[np.ndarray]
-    masks_crop: list[np.ndarray]
+    imgs_crop: ImgsList
+    masks_crop: ImgsList
+    maps_crop: MapsDict
     bboxes_ltwh_src: list[np.ndarray]
     ratios_src_to_dst: list[float]
 
-    def __init__(self, imgs_crop: list[np.ndarray], masks_crop: list[np.ndarray],
+    def __init__(self, imgs_crop: ImgsList, masks_crop: ImgsList, maps_crop: MapsDict,
                  bboxes_ltwh_src: list[np.ndarray], ratios_src_to_dst: list[float]):
         self.imgs_crop = imgs_crop
         self.masks_crop = masks_crop
+        self.maps_crop = maps_crop
         self.bboxes_ltwh_src = bboxes_ltwh_src
         self.ratios_src_to_dst = ratios_src_to_dst
 
 
-def crop_apply_masks(imgs: list[np.ndarray], masks: list[np.ndarray], bboxes_ltwh: list[np.ndarray], patch_sz: int,
-                     offset: float = 0.05) -> ImgsMasksCrop:
-    n = len(imgs)
-    imgs_crop = [np.zeros((patch_sz, patch_sz, 3), dtype=np.uint8) for _ in range(n)]
-    masks_crop = [np.zeros((patch_sz, patch_sz), dtype=np.uint8) for _ in range(n)]
-    bboxes_ltwh_src = [np.zeros(4, dtype=float) for _ in range(n)]
-    ratios_src_to_dst = []
-    r = 1 + offset
-    for img, mask, bbox_ltwh, img_crop, mask_crop, bbox_ltwh_src in zip(imgs, masks, bboxes_ltwh, imgs_crop, masks_crop, bboxes_ltwh_src):
-        img_sz = np.array((img.shape[1], img.shape[0]))
-        bbox_center = bbox_ltwh[:2] + bbox_ltwh[2:] / 2
-        bbox_sz = np.max(bbox_ltwh[2:])
-        bbox_sz_ext = bbox_sz * r
-        bbox_sz_ext2 = bbox_sz_ext / 2
-        bbox_sz_ext = bbox_sz_ext.astype(int)
-        bb_lt = (bbox_center - bbox_sz_ext2).astype(int)
-        bb_rb = bb_lt + bbox_sz_ext - 1
-        bb_lt_fit, bb_rb_fit = np.maximum(bb_lt, 0), np.minimum(bb_rb, img_sz - 1)
-        bb_sz_fit = bb_rb_fit - bb_lt_fit + 1
-        bb_lt_off = bb_lt_fit - bb_lt
-        img_patch = np.zeros((bbox_sz_ext, bbox_sz_ext, 3), np.uint8)
-        mask_patch = np.zeros((bbox_sz_ext, bbox_sz_ext), np.uint8)
-        p_p1, p_p2 = bb_lt_off, bb_lt_off + bb_sz_fit
-        i_p1, i_p2 = bb_lt_fit, bb_lt_fit + bb_sz_fit
-        slices_patch = slice(p_p1[1], p_p2[1]), slice(p_p1[0], p_p2[0])
-        slices_img = slice(i_p1[1], i_p2[1]), slice(i_p1[0], i_p2[0])
-        img_patch[slices_patch] = img[slices_img]
-        mask_patch[slices_patch] = mask[slices_img]
-        cv2.resize(img_patch, img_crop.shape[:2], img_crop, interpolation=cv2.INTER_AREA)
-        cv2.resize(mask_patch, mask_crop.shape, mask_crop, interpolation=cv2.INTER_NEAREST)
-        bbox_ltwh_src[:2] = bb_lt_fit
-        bbox_ltwh_src[2:] = bb_sz_fit
-        ratios_src_to_dst.append(patch_sz / bbox_sz_ext)
-    return ImgsMasksCrop(imgs_crop, masks_crop, bboxes_ltwh_src, ratios_src_to_dst)
+def make_square_img(sz: int, ch: int) -> np.ndarray:
+    shape = (sz, sz) if ch == 1 else (sz, sz, ch)
+    return np.zeros(shape, dtype=np.uint8)
+
+
+def crop_apply_mask(imgs: list[np.ndarray], mask: np.ndarray, bbox_ltwh: np.ndarray, sz_out: int,
+                    bb_ext_offset: float = 0.05) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, float]:
+    imgs_out = [make_square_img(sz_out, 3) for _ in imgs]
+    mask_out = make_square_img(sz_out, 1)
+    r = 1 + bb_ext_offset
+    sz_out2 = sz_out, sz_out
+    img_sz = np.array((imgs[0].shape[1], imgs[0].shape[0]))
+    bbox_center = bbox_ltwh[:2] + bbox_ltwh[2:] / 2
+    bbox_sz = np.max(bbox_ltwh[2:])
+    bbox_sz_ext = bbox_sz * r
+    bbox_sz_ext2 = bbox_sz_ext / 2
+    bbox_sz_ext = bbox_sz_ext.astype(int)
+    bb_lt = (bbox_center - bbox_sz_ext2).astype(int)
+    bb_rb = bb_lt + bbox_sz_ext - 1
+    bb_lt_fit, bb_rb_fit = np.maximum(bb_lt, 0), np.minimum(bb_rb, img_sz - 1)
+    bb_sz_fit = bb_rb_fit - bb_lt_fit + 1
+    bb_lt_off = bb_lt_fit - bb_lt
+    img_patch = np.zeros((bbox_sz_ext, bbox_sz_ext, 3), np.uint8)
+    mask_patch = np.zeros((bbox_sz_ext, bbox_sz_ext), np.uint8)
+    p_p1, p_p2 = bb_lt_off, bb_lt_off + bb_sz_fit
+    i_p1, i_p2 = bb_lt_fit, bb_lt_fit + bb_sz_fit
+    slices_patch = slice(p_p1[1], p_p2[1]), slice(p_p1[0], p_p2[0])
+    slices_img = slice(i_p1[1], i_p2[1]), slice(i_p1[0], i_p2[0])
+
+    for i in range(len(imgs)):
+        if i > 0:
+            img_patch.fill(0)
+        img_patch[slices_patch] = imgs[i][slices_img]
+        cv2.resize(img_patch, sz_out2, imgs_out[i], interpolation=cv2.INTER_AREA)
+
+    mask_patch[slices_patch] = mask[slices_img]
+    cv2.resize(mask_patch, sz_out2, mask_out, interpolation=cv2.INTER_NEAREST)
+
+    bbox_ltwh_src = np.concatenate([bb_lt_fit, bb_sz_fit])
+    ratio_src_to_dst = sz_out / bbox_sz_ext
+
+    return imgs_out, mask_out, bbox_ltwh_src, ratio_src_to_dst
 
 
 class GtImgsMasks:
     df_img: pd.DataFrame
     df_obj: pd.DataFrame
-    imgs: list[np.ndarray]
-    masks: list[np.ndarray]
-    imgs_crop: list[np.ndarray]
-    masks_crop: list[np.ndarray]
+    imgs: ImgsList
+    masks: ImgsList
+    maps: MapsDict
+    imgs_crop: ImgsList
+    masks_crop: ImgsList
+    maps_crop: MapsDict
     bboxes_ltwh_src: list[np.ndarray]
     ratios_src_to_dst: list[float]
 
     def __init__(self, df_img: pd.DataFrame, df_obj: pd.DataFrame,
-                 imgs: list[np.ndarray], masks: list[np.ndarray]):
+                 imgs: ImgsList, masks: ImgsList, maps: MapsDict):
         self.df_img = df_img
         self.df_obj = df_obj
         self.imgs = imgs
         self.masks = masks
+        self.maps = maps
         self.imgs_crop = []
         self.masks_crop = []
+        self.maps_crop = {}
         self.bboxes_ltwh_src = []
         self.ratios_src_to_dst = []
 
     def crop(self, patch_sz: int, offset: float = 0.05):
-        img_masks_crop = crop_apply_masks(self.imgs, self.masks, self.df_obj['bbox_visib_ltwh'], patch_sz, offset)
-        self.imgs_crop = img_masks_crop.imgs_crop
-        self.masks_crop = img_masks_crop.masks_crop
-        self.bboxes_ltwh_src = img_masks_crop.bboxes_ltwh_src
-        self.ratios_src_to_dst = img_masks_crop.ratios_src_to_dst
+        img_id_to_ind = {self.df_img.index[i]: i for i in range(len(self.df_img))}
+        map_names = list(self.maps.keys())
+        imgs_crop = []
+        maps_crop = {name: [] for name in map_names}
+        masks_crop = []
+        bboxes_ltwh_src = []
+        ratios_src_to_dst = []
+        for _, orow in self.df_obj.iterrows():
+            img_ind = img_id_to_ind[orow['img_ds_id']]
+            img = self.imgs[img_ind]
+            maps = [self.maps[name][img_ind] for name in map_names]
+            imgs = [img, *maps]
+            imgs_out, mask_out, bbox_ltwh_src, ratio_src_to_dst = \
+                crop_apply_mask(imgs, self.masks[img_ind], orow['bbox_visib_ltwh'], patch_sz, offset)
+            imgs_crop.append(imgs_out[0])
+            for i, name in enumerate(map_names):
+                maps_crop[name].append(imgs_out[i + 1])
+            masks_crop.append(mask_out)
+            bboxes_ltwh_src.append(bbox_ltwh_src)
+            ratios_src_to_dst.append(ratio_src_to_dst)
+        self.imgs_crop = imgs_crop
+        self.masks_crop = masks_crop
+        self.maps_crop = maps_crop
+        self.bboxes_ltwh_src = bboxes_ltwh_src
+        self.ratios_src_to_dst = ratios_src_to_dst
 
 
 def create_aug_default() -> iaa.Augmenter:
@@ -199,20 +241,23 @@ class ImgsObjsGtParams:
     ds_path: Path
     irows: pd.DataFrame
     orows: pd.DataFrame
+    maps_names: list[str]
     out_size: Optional[int] = None
     aug_name: Optional[str] = None
 
     def __init__(self, ds_path: Path, irows: pd.DataFrame, orows: pd.DataFrame, out_size: Optional[int] = None,
-                 aug_name: Optional[str] = None):
+                 aug_name: Optional[str] = None, maps_names: Optional[list[str]] = None):
         self.ds_path = ds_path
         self.irows = irows.copy()
         self.orows = orows.copy()
         self.out_size = out_size
         self.aug_name = aug_name
+        self.maps_names = [] if maps_names is None else maps_names
 
 
 def load_imgs_objs_gt(params: ImgsObjsGtParams) -> GtImgsMasks:
     imgs, masks = [], []
+    maps = {map_name: [] for map_name in params.maps_names}
     for img_ds_id, irow in params.irows.iterrows():
         orows_img = params.orows[params.orows['img_ds_id'] == img_ds_id]
         scene_id_str = id_to_str(irow['scene_id'])
@@ -232,11 +277,16 @@ def load_imgs_objs_gt(params: ImgsObjsGtParams) -> GtImgsMasks:
             mask_img[mask > 0] = orow['obj_ind'] + 1
         masks.append(mask_img)
 
+        for map_name in params.maps_names:
+            map_fpath = get_img_fpath(scene_path, img_id_str, map_name, 'png')
+            map_ = imread(map_fpath)
+            maps[map_name].append(map_)
+
     if params.aug_name is not None:
         aug = get_aug(params.aug_name)
         imgs = aug(images=imgs)
 
-    res = GtImgsMasks(params.irows, params.orows, imgs, masks)
+    res = GtImgsMasks(params.irows, params.orows, imgs, masks, maps)
     if params.out_size is not None:
         res.crop(params.out_size)
 
@@ -264,12 +314,24 @@ class BopView:
     def __len__(self):
         return len(self.ids)
 
-    def get_gt_task_params(self, i: IdsType, n: Optional[int] = None) -> ImgsObjsGtParams:
+    def _get_img_obj_rows(self, inds: IndsList, is_ids: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, Optional[int]]:
         raise Exception('Unimplemented')
 
-    def get_gt_imgs_masks(self, i: IdsType, n: int) -> GtImgsMasks:
-        params = self.get_gt_task_params(i, n)
-        params.aug_name = self.aug_name
+    def get_gt_task_params(self, i: IdsType, n: Optional[int] = None, is_ids: bool = False) -> ImgsObjsGtParams:
+        if type(i) in (list, np.ndarray, slice):
+            assert n is None
+            inds = i
+        else:
+            assert n is not None and n > 0
+            inds = slice(i, i + n) if not is_ids else np.arange(i, i + n)
+        if is_ids:
+            inds = np.array(inds)
+        irows, orows, out_size = self._get_img_obj_rows(inds, is_ids)
+        params = ImgsObjsGtParams(self.ds.get_ds_path(), irows, orows, out_size, self.aug_name, self.ds.maps_names)
+        return params
+
+    def get_gt_imgs_masks(self, i: IdsType, n: Optional[int] = None, is_ids: bool = False) -> GtImgsMasks:
+        params = self.get_gt_task_params(i, n, is_ids)
         return load_imgs_objs_gt(params)
 
     def get_gt_batch(self, i_batch: int) -> GtImgsMasks:
@@ -333,18 +395,12 @@ class BopImgsView(BopView):
     def __init__(self, ds: 'BopDataset', ids: np.ndarray, batch_size: Optional[int] = None, aug_name: Optional[str] = None):
         super().__init__(ds, ids, batch_size, aug_name)
 
-    def get_gt_task_params(self, i: IdsType, n: Optional[int] = None) -> ImgsObjsGtParams:
-        if type(i) in (list, np.ndarray, range):
-            assert n is None
-            inds = i
-        else:
-            assert n is not None and n > 0
-            inds = slice(i, i + n)
-        img_ds_ids = self.ids[inds]
+    def _get_img_obj_rows(self, inds: IndsList, is_ids: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, Optional[int]]:
+        img_ds_ids = inds if is_ids else self.ids[inds]
         dfi, dfo = self.ds.df_img, self.ds.df_obj
         irows = dfi.loc[img_ds_ids]
         orows = dfo[dfo['img_ds_id'].isin(img_ds_ids)]
-        return ImgsObjsGtParams(self.ds.get_ds_path(), irows, orows)
+        return irows, orows, None
 
 
 class BopObjsView(BopView):
@@ -384,17 +440,19 @@ class BopObjsView(BopView):
 
         if min_mask_ratio is not None or min_bbox_dim_ratio is not None:
             dfo = ds.df_obj.loc[ids]
-            dfo = dfo[dfo['px_count_visib'] > 0]
+            dfo = dfo[dfo['px_count_visib'] > 1e-6]
             dfi = ds.df_img.loc[dfo['img_ds_id']]
             if min_mask_ratio is not None:
                 img_area = dfi['img_width'] * dfi['img_height']
                 inds = dfo['px_count_visib'].values / img_area.values >= min_mask_ratio
+                print(f'min_mask_ratio: {len(inds)} --> {inds.sum()}')
                 dfo, dfi = dfo[inds], dfi[inds]
             if min_bbox_dim_ratio is not None:
                 bbox_ltwh = np.stack(dfo['bbox_visib_ltwh'])
                 bbox_sz = bbox_ltwh[:, 2:].min(axis=1)
                 img_area = dfi[['img_width', 'img_height']].max(axis=1)
                 inds = bbox_sz / img_area.values >= min_bbox_dim_ratio
+                print(f'min_bbox_dim_ratio: {len(inds)} --> {inds.sum()}')
                 dfo = dfo[inds]
             ids = dfo.index.values
 
@@ -407,18 +465,12 @@ class BopObjsView(BopView):
     def set_out_size(self, out_size: int):
         self.out_size = out_size
 
-    def get_gt_task_params(self, i: IdsType, n: Optional[int] = None) -> ImgsObjsGtParams:
-        if type(i) in (list, np.ndarray, range):
-            assert n is None
-            inds = i
-        else:
-            assert n is not None and n > 0
-            inds = slice(i, i + n)
-        obj_ds_ids = self.ids[inds]
+    def _get_img_obj_rows(self, inds: IndsList, is_ids: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, Optional[int]]:
+        obj_ds_ids = inds if is_ids else self.ids[inds]
         orows = self.ds.df_obj.loc[obj_ds_ids]
         img_ds_ids = pd.unique(orows['img_ds_id'])
         irows = self.ds.df_img.loc[img_ds_ids]
-        return ImgsObjsGtParams(self.ds.get_ds_path(), irows, orows, self.out_size)
+        return irows, orows, self.out_size
 
 
 class BopDataset:
@@ -436,17 +488,20 @@ class BopDataset:
     df_img: pd.DataFrame
     df_obj: pd.DataFrame
     shuffled: bool
+    maps_names: list[str]
 
     pool: Optional[mpr.Pool] = None
     pool_refcount = 0
 
-    def __init__(self, bop_path: Path, ds_name: str, ds_subdir: str, df_img: pd.DataFrame, df_obj: pd.DataFrame, shuffled: bool) -> None:
+    def __init__(self, bop_path: Path, ds_name: str, ds_subdir: str, df_img: pd.DataFrame, df_obj: pd.DataFrame, shuffled: bool,
+                 maps_names: tuple[str] = ('norm', 'noc')) -> None:
         self.bop_path = bop_path
         self.ds_name = ds_name
         self.ds_subdir = ds_subdir
         self.df_img = df_img
         self.df_obj = df_obj
         self.shuffled = shuffled
+        self.maps_names = list(maps_names)
     
     @classmethod
     def get_cache_path(cls, bop_path: Path, ds_name: str) -> Path:
@@ -536,7 +591,8 @@ class BopDataset:
             return None
 
     @classmethod
-    def from_dir(cls, bop_path: Path, ds_name: str, ds_subdir: str, shuffle: bool, skip_cache: bool = False) -> 'BopDataset':
+    def from_dir(cls, bop_path: Path, ds_name: str, ds_subdir: str, shuffle: bool, skip_cache: bool = False,
+                 maps_names: tuple[str] = ('norm', 'noc')) -> 'BopDataset':
         ds_path = bop_path / ds_name
         train_path = ds_path / ds_subdir
         cache_path = cls.get_cache_path(bop_path, ds_name)
@@ -547,10 +603,12 @@ class BopDataset:
         ds = None
         if cache_path.exists():
             ds = cls.read_cache(cache_path)
+            if ds is not None:
+                if shuffle:
+                    ds.shuffle()
+                ds.maps_names = maps_names
+                return ds
         
-        if ds is not None:
-            return ds
-
         img_data = []
         img_keys = [
             'img_ds_id',
@@ -633,7 +691,7 @@ class BopDataset:
         df_img.set_index('img_ds_id', inplace=True)
         df_obj.set_index('obj_ds_id', inplace=True)
 
-        ds = BopDataset(bop_path, ds_name, ds_subdir, df_img, df_obj, False)
+        ds = BopDataset(bop_path, ds_name, ds_subdir, df_img, df_obj, shuffled=False, maps_names=maps_names)
         written_to_cache = False
         if shuffle:
             written_to_cache = ds.shuffle()

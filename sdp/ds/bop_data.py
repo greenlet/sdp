@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
@@ -5,7 +7,11 @@ from typing import Any, Union
 
 from imageio.v3 import imread
 
+from sdp.lib3d.io import Mesh
 from sdp.utils.data import read_json
+
+
+MESH_FNAME_PAT = re.compile(r'^obj_(\d{6})\.ply$')
 
 
 @dataclass
@@ -50,6 +56,7 @@ class BopModelInfo:
 
 
 BopModelsInfo = dict[int, BopModelInfo]
+
 
 def read_models_info(models_info_fpath: Path) -> BopModelsInfo:
     data = read_json(models_info_fpath)
@@ -172,5 +179,16 @@ def read_masks(data_path: Path, scene_id: int, masks_subdir: str, img_id: int, n
         mask_fpath = masks_path / f'{img_id_str}_{obj_id_str}.png'
         mask = imread(mask_fpath)
         res.append(mask)
+    return res
+
+
+def read_meshes(meshes_path: Path) -> dict[int, Mesh]:
+    res = {}
+    for fpath in meshes_path.iterdir():
+        m = MESH_FNAME_PAT.match(fpath.name)
+        if not m:
+            continue
+        obj_id = int(m.group(1))
+        res[obj_id] = Mesh.read_mesh(fpath, 1e-3)
     return res
 
