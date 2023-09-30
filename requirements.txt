@@ -12,3 +12,9 @@ PyOpenGL
 PyOpenGL_accelerate
 scipy
 
+einops
+mmcv
+pyyaml
+timm
+torch
+tqdm

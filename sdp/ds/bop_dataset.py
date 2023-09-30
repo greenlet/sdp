@@ -9,6 +9,7 @@ from typing import Optional, Union, Generator, Callable, Any, Generic, TypeVar, 
 
 import cv2
 import imgaug.augmenters as iaa
+import torch
 from imageio.v3 import imread
 import numpy as np
 import pandas as pd
@@ -156,30 +157,57 @@ def crop_apply_mask(imgs: list[np.ndarray], mask: np.ndarray, bbox_ltwh: np.ndar
     return imgs_out, mask_out, bbox_ltwh_src, ratio_src_to_dst
 
 
+def img_to_tensor(img: np.ndarray, mask: Optional[np.ndarray] = None) -> torch.Tensor:
+    if mask is not None:
+        img[~mask] = 0
+    img = img.astype(np.float32) / 255
+    return torch.from_numpy(img)
+
+
+def imgs_list_to_tensors(imgs: list[np.ndarray], masks: Optional[list[np.ndarray]] = None) -> list[torch.Tensor]:
+    res = []
+    for i, img in enumerate(imgs):
+        mask = None if masks is None else masks[i]
+        res.append(img_to_tensor(img, mask))
+    return res
+
+
+def imgs_dict_to_tensors(imgs_dict: dict[str, list[np.ndarray]], masks: Optional[list[np.ndarray]] = None) -> dict[str, torch.Tensor]:
+    return {k: imgs_list_to_tensors(imgs, masks) for k, imgs in imgs_dict.items()}
+
+
 class GtImgsMasks:
     df_img: pd.DataFrame
     df_obj: pd.DataFrame
     imgs: ImgsList
     masks: ImgsList
+    maps_names: list[str]
     maps: MapsDict
     imgs_crop: ImgsList
     masks_crop: ImgsList
     maps_crop: MapsDict
     bboxes_ltwh_src: list[np.ndarray]
     ratios_src_to_dst: list[float]
+    imgs_crop_tn: list[torch.Tensor]
+    maps_crop_tn: dict[str, torch.Tensor]
 
-    def __init__(self, df_img: pd.DataFrame, df_obj: pd.DataFrame,
-                 imgs: ImgsList, masks: ImgsList, maps: MapsDict):
+    def __init__(self, df_img: pd.DataFrame, df_obj: pd.DataFrame, imgs: ImgsList, masks: ImgsList, maps_names: list[str],
+                 maps: MapsDict, imgs_crop: Optional[ImgsList] = None, masks_crop: Optional[ImgsList] = None,
+                 maps_crop: Optional[MapsDict] = None, bboxes_ltwh_src: Optional[list[np.ndarray]] = None, ratios_src_to_dst: Optional[list[float]] = None,
+                 imgs_crop_tn: Optional[list[torch.Tensor]] = None, maps_crop_tn: Optional[dict[str, torch.Tensor]] = None):
         self.df_img = df_img
         self.df_obj = df_obj
         self.imgs = imgs
         self.masks = masks
+        self.maps_names = maps_names
         self.maps = maps
-        self.imgs_crop = []
-        self.masks_crop = []
-        self.maps_crop = {}
-        self.bboxes_ltwh_src = []
-        self.ratios_src_to_dst = []
+        self.imgs_crop = imgs_crop or []
+        self.masks_crop = masks_crop or []
+        self.maps_crop = maps_crop or {}
+        self.bboxes_ltwh_src = bboxes_ltwh_src or []
+        self.ratios_src_to_dst = ratios_src_to_dst or []
+        self.imgs_crop_tn = imgs_crop_tn or []
+        self.maps_crop_tn = maps_crop_tn or []
 
     def crop(self, patch_sz: int, offset: float = 0.05):
         img_id_to_ind = {self.df_img.index[i]: i for i in range(len(self.df_img))}
@@ -207,6 +235,22 @@ class GtImgsMasks:
         self.maps_crop = maps_crop
         self.bboxes_ltwh_src = bboxes_ltwh_src
         self.ratios_src_to_dst = ratios_src_to_dst
+
+    def gen_res(self, return_tensors: bool, keep_source_images: bool, keep_cropped_images: bool) -> 'GtImgsMasks':
+        imgs, masks, maps = self.imgs, self.masks, self.maps
+        imgs_crop, masks_crop, maps_crop = self.imgs_crop, self.masks_crop, self.maps_crop
+        imgs_crop_tn, maps_crop_tn = [], []
+        if return_tensors:
+            assert len(imgs_crop) > 0
+            imgs_crop_tn = imgs_list_to_tensors(imgs_crop, masks_crop)
+            maps_crop_tn = imgs_dict_to_tensors(maps_crop, masks_crop)
+        if not keep_source_images:
+            imgs, masks, maps = [], [], []
+        if not keep_cropped_images:
+            imgs_crop, masks_crop, maps_crop = [], [], []
+        return GtImgsMasks(self.df_img, self.df_obj, imgs, masks, self.maps_names, maps,
+                           imgs_crop, masks_crop, maps_crop, self.bboxes_ltwh_src, self.ratios_src_to_dst,
+                           imgs_crop_tn, maps_crop_tn)
 
 
 def create_aug_default() -> iaa.Augmenter:
@@ -244,15 +288,22 @@ class ImgsObjsGtParams:
     maps_names: list[str]
     out_size: Optional[int] = None
     aug_name: Optional[str] = None
+    return_tensors: bool = False
+    keep_source_images: bool = True
+    keep_cropped_images: bool = True
 
     def __init__(self, ds_path: Path, irows: pd.DataFrame, orows: pd.DataFrame, out_size: Optional[int] = None,
-                 aug_name: Optional[str] = None, maps_names: Optional[list[str]] = None):
+                 aug_name: Optional[str] = None, maps_names: Optional[list[str]] = None, return_tensors: bool = False,
+                 keep_source_images: bool = True, keep_cropped_images: bool = True):
         self.ds_path = ds_path
         self.irows = irows.copy()
         self.orows = orows.copy()
         self.out_size = out_size
         self.aug_name = aug_name
         self.maps_names = [] if maps_names is None else maps_names
+        self.return_tensors = return_tensors
+        self.keep_source_images = keep_source_images
+        self.keep_cropped_images = keep_cropped_images
 
 
 def load_imgs_objs_gt(params: ImgsObjsGtParams) -> GtImgsMasks:
@@ -286,11 +337,12 @@ def load_imgs_objs_gt(params: ImgsObjsGtParams) -> GtImgsMasks:
         aug = get_aug(params.aug_name)
         imgs = aug(images=imgs)
 
-    res = GtImgsMasks(params.irows, params.orows, imgs, masks, maps)
+    gt = GtImgsMasks(params.irows, params.orows, imgs, masks, params.maps_names, maps)
     if params.out_size is not None:
-        res.crop(params.out_size)
+        gt.crop(params.out_size)
+    gt = gt.gen_res(params.return_tensors, params.keep_source_images, params.keep_cropped_images)
 
-    return res
+    return gt
 
 
 class BopView:
@@ -298,12 +350,19 @@ class BopView:
     ids: np.ndarray
     batch_size: Optional[int] = None
     aug_name: Optional[str] = None
+    return_tensors: bool = False
+    keep_source_images: bool = True
+    keep_cropped_images: bool = True
 
-    def __init__(self, ds: 'BopDataset', ids: np.ndarray, batch_size: Optional[int] = None, aug_name: Optional[str] = None):
+    def __init__(self, ds: 'BopDataset', ids: np.ndarray, batch_size: Optional[int] = None, aug_name: Optional[str] = None,
+                 return_tensors: Optional[bool] = None, keep_source_images: Optional[bool] = None, keep_cropped_images: Optional[bool] = None):
         self.ds = ds
         self.ids = ids.copy()
         self.batch_size = batch_size
         self.aug_name = aug_name
+        self.return_tensors = self.return_tensors if return_tensors is None else return_tensors
+        self.keep_source_images = self.keep_source_images if keep_source_images is None else keep_source_images
+        self.keep_cropped_images = self.keep_cropped_images if keep_cropped_images is None else keep_cropped_images
 
     def set_batch_size(self, batch_size: int):
         self.batch_size = batch_size
@@ -317,8 +376,11 @@ class BopView:
     def _get_img_obj_rows(self, inds: IndsList, is_ids: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, Optional[int]]:
         raise Exception('Unimplemented')
 
-    def get_gt_task_params(self, i: IdsType, n: Optional[int] = None, is_ids: bool = False) -> ImgsObjsGtParams:
-        if type(i) in (list, np.ndarray, slice):
+    def get_gt_task_params(self, i: IdsType, n: Optional[int] = None, is_ids: bool = False,
+                           aug_name: Optional[str] = None, return_tensors: Optional[bool] = None,
+                           keep_source_images: Optional[bool] = None, keep_cropped_images: Optional[bool] = None)\
+            -> ImgsObjsGtParams:
+        if type(i) in (list, np.ndarray, slice, range):
             assert n is None
             inds = i
         else:
@@ -327,8 +389,14 @@ class BopView:
         if is_ids:
             inds = np.array(inds)
         irows, orows, out_size = self._get_img_obj_rows(inds, is_ids)
-        params = ImgsObjsGtParams(self.ds.get_ds_path(), irows, orows, out_size, self.aug_name, self.ds.maps_names)
-        return params
+        return ImgsObjsGtParams(
+            self.ds.get_ds_path(), irows, orows, out_size,
+            aug_name and self.aug_name,
+            self.ds.maps_names,
+            self.return_tensors if return_tensors is None else return_tensors,
+            self.keep_source_images if keep_source_images is None else keep_source_images,
+            self.keep_cropped_images if keep_cropped_images is None else keep_cropped_images,
+        )
 
     def get_gt_imgs_masks(self, i: IdsType, n: Optional[int] = None, is_ids: bool = False) -> GtImgsMasks:
         params = self.get_gt_task_params(i, n, is_ids)
@@ -340,10 +408,10 @@ class BopView:
         return self.get_gt_imgs_masks(i, self.batch_size)
 
     def get_batch_iterator(self, n_batches: Optional[int] = None, multiprocess: bool = False, batch_size: Optional[int] = None,
-                           drop_last: bool = False, shuffle_between_loops: bool = True, buffer_sz: int = 3,
-                           aug_name: Optional[str] = None) -> Generator[GtImgsMasks, None, None]:
-        batch_size = batch_size if batch_size is not None else self.batch_size
-        aug_name = aug_name if aug_name is not None else self.aug_name
+                           drop_last: bool = False, shuffle_between_loops: bool = True, buffer_sz: int = 3, aug_name: Optional[str] = None,
+                           return_tensors: Optional[bool] = None, keep_source_images: Optional[bool] = None, keep_cropped_images: Optional[bool] = None)\
+            -> Generator[GtImgsMasks, None, None]:
+        batch_size = batch_size or self.batch_size
         n = len(self.ids)
         n_batches_total = n // batch_size + min(n % batch_size, 1)
 
@@ -354,7 +422,7 @@ class BopView:
         looped = False
         if n_batches is None:
             n_batches = n_batches_total
-        elif n_batches > n_batches_total:
+        if n_batches > n_batches_total:
             looped = True
 
         def batch_gen() -> Generator[ImgsObjsGtParams, None, None]:
@@ -375,8 +443,9 @@ class BopView:
                     else:
                         rest = batch_size - batch_size_cur
                         inds = list(range(i, n)) + list(range(rest))
-                params = self.get_gt_task_params(inds)
-                params.aug_name = aug_name
+                params = self.get_gt_task_params(
+                    inds, aug_name=aug_name, return_tensors=return_tensors,
+                    keep_source_images=keep_source_images, keep_cropped_images=keep_cropped_images)
                 yield params
 
         batch_it = iter(batch_gen())
@@ -392,8 +461,9 @@ class BopView:
 
 
 class BopImgsView(BopView):
-    def __init__(self, ds: 'BopDataset', ids: np.ndarray, batch_size: Optional[int] = None, aug_name: Optional[str] = None):
-        super().__init__(ds, ids, batch_size, aug_name)
+    def __init__(self, ds: 'BopDataset', ids: np.ndarray, batch_size: Optional[int] = None, aug_name: Optional[str] = None,
+                 return_tensors: Optional[bool] = None, keep_source_images: Optional[bool] = None, keep_cropped_images: Optional[bool] = None):
+        super().__init__(ds, ids, batch_size, aug_name, return_tensors, keep_source_images, keep_cropped_images)
 
     def _get_img_obj_rows(self, inds: IndsList, is_ids: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, Optional[int]]:
         img_ds_ids = inds if is_ids else self.ids[inds]
@@ -411,7 +481,8 @@ class BopObjsView(BopView):
 
     def __init__(self, ds: 'BopDataset', ids: Optional[np.ndarray] = None, obj_ids: Optional[IdsType] = None,
                  batch_size: Optional[int] = None, out_size: Optional[int] = None, min_bbox_dim_ratio: Optional[float] = None,
-                 min_mask_ratio: Optional[float] = None, aug_name: Optional[str] = None):
+                 min_mask_ratio: Optional[float] = None, aug_name: Optional[str] = None,
+                 return_tensors: Optional[bool] = None, keep_source_images: Optional[bool] = None, keep_cropped_images: Optional[bool] = None):
         if min_bbox_dim_ratio is not None: assert min_bbox_dim_ratio > 0
         if min_mask_ratio is not None: assert min_mask_ratio > 0
 
@@ -459,7 +530,7 @@ class BopObjsView(BopView):
         self.min_mask_ratio = min_mask_ratio
         self.min_bbox_dim_ratio = min_bbox_dim_ratio
         self.out_size = out_size
-        super().__init__(ds, ids, batch_size, aug_name)
+        super().__init__(ds, ids, batch_size, aug_name, return_tensors, keep_source_images, keep_cropped_images)
         self.obj_ids = obj_ids
 
     def set_out_size(self, out_size: int):
@@ -511,8 +582,10 @@ class BopDataset:
     def shuffle(self) -> bool:
         if self.shuffled:
             return False
+        print('Shuffle!')
         self.df_img = self.df_img.sample(len(self.df_img))
         self.df_obj = self.df_obj.sample(len(self.df_obj))
+        self.shuffled = True
         self.write_cache()
         return True
 
@@ -600,7 +673,6 @@ class BopDataset:
             print(f'Removing {cache_path}')
             shutil.rmtree(cache_path, ignore_errors=True)
         
-        ds = None
         if cache_path.exists():
             ds = cls.read_cache(cache_path)
             if ds is not None:
@@ -700,14 +772,24 @@ class BopDataset:
 
         return ds
 
-    def get_imgs_view(self, batch_size: Optional[int] = None, aug_name: Optional[str] = None) -> BopImgsView:
-        return BopImgsView(self, self.df_img.index.values, batch_size, aug_name=aug_name)
+    def get_imgs_view(self, batch_size: Optional[int] = None, aug_name: Optional[str] = None,
+                      return_tensors: Optional[bool] = None, keep_source_images: Optional[bool] = None, keep_cropped_images: Optional[bool] = None
+                      ) -> BopImgsView:
+        return BopImgsView(
+            self, self.df_img.index.values, batch_size, aug_name=aug_name,
+            return_tensors=return_tensors, keep_source_images=keep_source_images, keep_cropped_images=keep_cropped_images,
+        )
 
     def get_objs_view(self, obj_ids: IdsType = -1, batch_size: Optional[int] = None,
                       out_size: Optional[int] = None, min_bbox_dim_ratio: Optional[float] = 0.05,
-                      min_mask_ratio: Optional[float] = 0.001, aug_name: Optional[str] = None) -> BopObjsView:
-        return BopObjsView(self, obj_ids=obj_ids, batch_size=batch_size, out_size=out_size, min_bbox_dim_ratio=min_bbox_dim_ratio,
-                           min_mask_ratio=min_mask_ratio, aug_name=aug_name)
+                      min_mask_ratio: Optional[float] = 0.001, aug_name: Optional[str] = None,
+                      return_tensors: Optional[bool] = None, keep_source_images: Optional[bool] = None, keep_cropped_images: Optional[bool] = None
+                      ) -> BopObjsView:
+        return BopObjsView(
+            self, obj_ids=obj_ids, batch_size=batch_size, out_size=out_size, min_bbox_dim_ratio=min_bbox_dim_ratio,
+            min_mask_ratio=min_mask_ratio, aug_name=aug_name,
+            return_tensors=return_tensors, keep_source_images=keep_source_images, keep_cropped_images=keep_cropped_images,
+        )
 
     def get_ds_path(self) -> Path:
         return self.bop_path / self.ds_name / self.ds_subdir

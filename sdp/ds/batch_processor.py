@@ -1,5 +1,6 @@
 import multiprocessing as mpr
 import threading as thr
+import traceback
 from typing import Optional, Generator, Callable, Any, Generic, TypeVar, Iterator
 
 TBatchParams = TypeVar('TBatchParams')
@@ -25,11 +26,13 @@ class BatchResultContainer(Generic[TBatchResult]):
     batch_id: int
     result: Optional[TBatchResult]
     ex: Optional[Exception]
+    tb_str: Optional[str]
 
-    def __init__(self, batch_id: int, result: Optional[TBatchResult] = None, ex: Optional[Exception] = None):
+    def __init__(self, batch_id: int, result: Optional[TBatchResult] = None, ex: Optional[Exception] = None, tb_str: Optional[str] = None):
         self.batch_id = batch_id
         self.result = result
         self.ex = ex
+        self.tb_str = tb_str
 
 
 def process_batch(params_cont: BatchParamsContainer) -> BatchResultContainer:
@@ -37,7 +40,8 @@ def process_batch(params_cont: BatchParamsContainer) -> BatchResultContainer:
         result = params_cont.worker_fn(params_cont.params)
         return BatchResultContainer(params_cont.batch_id, result)
     except Exception as ex:
-        return BatchResultContainer(params_cont.batch_id, ex=ex)
+        tb_str = '\n'.join(traceback.format_stack())
+        return BatchResultContainer(params_cont.batch_id, ex=ex, tb_str=tb_str)
 
 
 class BatchProcessor(Generic[TBatchParams, TBatchResult]):
@@ -111,6 +115,10 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
         res = self.id_to_results[batch_id]
         del self.id_to_results[batch_id]
         self.sync_workers()
+        if res.ex:
+            print(f'Batch {batch_id} error')
+            traceback.print_exception(res.ex)
+            print(res.tb_str)
         return res.result
 
     def stop(self):

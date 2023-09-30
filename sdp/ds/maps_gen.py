@@ -27,6 +27,7 @@ class NocNormsParams:
 
 
 def gen_noc_norms(params: NocNormsParams):
+    print(f'Worker {params.worker_id} starting')
     cache_path = params.ds_root_path / BopDataset.cache_subdir
     ds = BopDataset.read_cache(cache_path)
     models_info_path = params.ds_root_path / params.models_subdir
@@ -66,6 +67,7 @@ def gen_noc_norms(params: NocNormsParams):
         # print(img_norm.shape, img_norm.min(), img_norm.mean(), img_norm.max())
         imsave(norm_fpath, img_norm)
         imsave(noc_fpath, img_noc)
+    print(f'Worker {params.worker_id} stopping')
 
 
 def gen_noc_params_mp(bop_path: Path, ds_name: str, n_proc: int = -1):
@@ -89,6 +91,7 @@ def gen_noc_params_mp(bop_path: Path, ds_name: str, n_proc: int = -1):
     print(f'Waiting for {len(ps)} processes to stop')
     for p in ps:
         p.join()
+    print('Main process exiting')
 
 
 def test_gen_noc_params():
