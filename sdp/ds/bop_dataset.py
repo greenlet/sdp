@@ -16,11 +16,11 @@ import pandas as pd
 
 from sdp.ds.batch_processor import BatchProcessor
 from sdp.ds.bop_data import read_scene_camera, read_scene_gt, read_scene_gt_info, id_to_str
+from sdp.utils.common import SplitsType, split_range
 from sdp.utils.data import read_yaml, write_yaml
 
 MAP_NORM_NAME = 'norm'
 MAP_NOC_NAME = 'noc'
-SplitsType = Union[int, list[int], float, list[float]]
 IndsList = Union[list[int], np.ndarray, slice]
 IdsType = Union[int, IndsList]
 ImgsList = list[np.ndarray]
@@ -36,65 +36,6 @@ def get_img_fpath(scene_path: Path, img_id_str: str, dir_sfx: str = '', ext='jpg
 
 def get_mask_visib_fpath(scene_path: Path, img_id_str: str, obj_ind: int) -> Path:
     return scene_path / 'mask_visib' / f'{img_id_str}_{id_to_str(obj_ind)}.png'
-
-
-def split_range(n: int, splits: SplitsType) -> list[int]:
-    res = [0]
-    if type(splits) == int:
-        assert splits == -1 or 0 < splits <= n
-        if splits == -1:
-            return [0, n]
-        div, rem = divmod(n, splits)
-        i_split, i = 0, 0
-        while i_split < splits:
-            off = div
-            if rem > 0:
-                off += 1
-                rem -= 1
-            i += off
-            res.append(i)
-            i_split += 1
-        return res
-
-    if type(splits) == list and len(splits) == 0:
-        return [0, n]
-
-    if type(splits) == float:
-        splits = [splits]
-
-    if type(splits) == list and type(splits[0]) == float:
-        spl = []
-        was_neg, total = False, 0
-        for s in splits:
-            if s < 0:
-                spl.append(-1)
-                was_neg = True
-            else:
-                x = int(n * s)
-                spl.append(x)
-                total += x
-        if not was_neg and total < n:
-            spl.append(n - total)
-        splits = spl
-
-    if type(splits) == list and type(splits[0]) == int:
-        was_neg, total = False, 0
-        for s in splits:
-            assert type(s) == int
-            if s == -1:
-                assert not was_neg
-                was_neg = True
-            else:
-                assert s > 0
-                total += s
-        assert was_neg and total < n or total == n, f'was_neg: {was_neg}. total: {total}. n: {n}'
-        i, rest = 0, n - total
-        for s in splits:
-            i += (s if s > 0 else rest)
-            res.append(i)
-        return res
-
-    raise Exception(f'Unknown splits format: {splits}')
 
 
 class ImgsMasksCrop:
@@ -489,12 +430,13 @@ class BopObjsView(BopView):
         if ids is not None:
             assert obj_ids is None, f'Either ids or obj_ids can have non-None value. Input provided: ' \
                                     f'ids = {ids}, obj_ids = {obj_ids}'
+            ids = ids.copy()
             df_obj = ds.df_obj.loc[ids]
             obj_ids = df_obj['obj_id'].unique()
 
-        if obj_ids is not None:
+        else:
             obj_ids_all = ds.df_obj['obj_id'].unique()
-            if obj_ids == -1:
+            if obj_ids is None or obj_ids == -1:
                 obj_ids_common = obj_ids_all
             else:
                 if type(obj_ids) == int:
@@ -536,12 +478,27 @@ class BopObjsView(BopView):
     def set_out_size(self, out_size: int):
         self.out_size = out_size
 
+    def set_aug_name(self, aug_name: str):
+        self.aug_name = aug_name
+
     def _get_img_obj_rows(self, inds: IndsList, is_ids: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, Optional[int]]:
         obj_ds_ids = inds if is_ids else self.ids[inds]
         orows = self.ds.df_obj.loc[obj_ds_ids]
         img_ds_ids = pd.unique(orows['img_ds_id'])
         irows = self.ds.df_img.loc[img_ds_ids]
         return irows, orows, self.out_size
+
+    def split(self, splits: SplitsType) -> tuple['BopObjsView', ...]:
+        intervals = split_range(len(self.ids), splits)
+        res = []
+        for i in range(1, len(intervals)):
+            ids = self.ids[intervals[i - 1]:intervals[i]]
+            ov = BopObjsView(
+                ds=self.ds, ids=ids, batch_size=self.batch_size, out_size=self.out_size, aug_name=self.aug_name,
+                return_tensors=self.return_tensors, keep_source_images=self.keep_source_images, keep_cropped_images=self.keep_cropped_images
+            )
+            res.append(ov)
+        return tuple(res)
 
 
 class BopDataset:

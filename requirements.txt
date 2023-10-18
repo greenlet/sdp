@@ -1,20 +1,21 @@
 
+einops
 glfw
 imageio
 imgaug
 jupyter
 matplotlib
+mmcv
 numpy
 opencv-python
 pandas
 pydantic-cli
+pydantic-yaml
 PyOpenGL
 PyOpenGL_accelerate
-scipy
-
-einops
-mmcv
 pyyaml
+scipy
 timm
 torch
 tqdm
+
