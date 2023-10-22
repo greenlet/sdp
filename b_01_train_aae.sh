@@ -7,10 +7,21 @@ train_root_path=$data_path/train_aae
 ds_name=itodd
 img_size=256
 obj_id=1
-epochs=100
+
+#epochs=3
+#train_epoch_steps=20
+#val_epoch_steps=10
+#batch_size=5
+#device=cpu
+epochs=200
+train_epoch_steps=-1
+val_epoch_steps=-1
 batch_size=10
+device=mps
+
 train_subdir=last_or_new
-device=cpu
+train_subdir=new
+learning_rate=0.01
 
 sdp_src_path=$code_path/sdp
 segm_src_path=$code_path/lib/segmenter
@@ -25,7 +36,10 @@ python b_01_train_aae.py \
   --obj-id $obj_id \
   --img-size $img_size \
   --epochs $epochs \
+  --train-epoch-steps $train_epoch_steps \
+  --val-epoch-steps $val_epoch_steps \
   --batch-size $batch_size \
-  --device $device
+  --device $device \
+  --learning-rate $learning_rate
 
 

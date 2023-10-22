@@ -7,14 +7,16 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 import shutil
-from typing import Optional, Union
+from typing import Optional, Union, Any
 
 import numpy as np
 import torch
+import torchvision as tv
+import torch.utils.tensorboard as tb
+from tqdm import trange
 from pydantic import BaseModel, Field, validator
 from pydantic_cli import run_and_exit
 from pydantic_yaml import parse_yaml_raw_as, to_yaml_str, parse_yaml_file_as
-from tqdm import trange
 
 from sdp.ds.bop_dataset import BopDataset, AUGNAME_DEFAULT
 from sdp.models.segmenter.factory import create_segmenter
@@ -72,6 +74,20 @@ class Config(BaseModel):
         description='Number of training epochs.',
         cli=('--epochs',),
     )
+    train_epoch_steps: Optional[int] = Field(
+        None,
+        required=False,
+        description='Number of training steps per epoch. When TRAIN_EPOCH_STEPS <= 0 '
+                    'the number of steps will be a number of batches contained in dataset. (default is -1)',
+        cli=('--train-epoch-steps',),
+    )
+    val_epoch_steps: Optional[int] = Field(
+        None,
+        required=False,
+        description='Number of validation steps per epoch. When VAL_EPOCH_STEPS <= 0 '
+                    'the number of steps will be a number of batches contained in dataset. (default is -1)',
+        cli=('--val-epoch-steps',),
+    )
     batch_size: Optional[int] = Field(
         None,
         required=False,
@@ -98,6 +114,12 @@ class Config(BaseModel):
         required=False,
         description='Device to run training on. Can have values: "cpu", "gpu"',
         cli=('--device',)
+    )
+    learning_rate: float = Field(
+        0.001,
+        required=False,
+        description='Initial learning rate of the training process.',
+        cli=('--learning-rate',)
     )
 
 
@@ -150,7 +172,10 @@ class TrainCfg(BaseModel):
     img_size: int
     last_epoch: int
     epochs: int
+    train_epoch_steps: int
+    val_epoch_steps: int
     batch_size: int
+    learning_rate: float
     train_path: Path
     last_checkpoint_fpath: Path
     best_checkpoint_fpath: Path
@@ -237,6 +262,17 @@ class TrainCfg(BaseModel):
         return last_subdir
 
     @classmethod
+    def _coalesce(cls, val: Optional[Any], default: Any):
+        return val if val is not None else default
+
+    @classmethod
+    def _update_tcfg(cls, tcfg: 'TrainCfg', cfg: Config):
+        tcfg.epochs = cls._coalesce(cfg.epochs, tcfg.epochs)
+        tcfg.train_epoch_steps = cls._coalesce(cfg.train_epoch_steps, tcfg.train_epoch_steps)
+        tcfg.val_epoch_steps = cls._coalesce(cfg.val_epoch_steps, tcfg.val_epoch_steps)
+        tcfg.batch_size = cls._coalesce(cfg.batch_size, tcfg.batch_size)
+
+    @classmethod
     def from_cfg(cls, cfg: Config) -> 'TrainCfg':
         train_subdir_src = TrainSubdirType.from_str(cfg.train_subdir)
         train_subdir: Optional[cls._TrainSubdir] = None
@@ -265,14 +301,18 @@ class TrainCfg(BaseModel):
             tcfg = cls.from_yaml(fpath)
             assert ds_name == tcfg.dataset_name and obj_id == tcfg.obj_id and img_sz == tcfg.img_size and dt == tcfg.dt,\
                 f'Train subdir "{train_subdir}" does not match config parameters: {tcfg}'
+
+            cls._update_tcfg(tcfg, cfg)
             return tcfg
 
         tpath = cfg.train_root_path / train_subdir.name
         fpath = tpath / cls._fname
         if fpath.exists():
-            return cls.from_yaml(fpath)
+            tcfg = cls.from_yaml(fpath)
+            cls._update_tcfg(tcfg, cfg)
+            return tcfg
 
-        return TrainCfg(
+        tcfg = TrainCfg(
             bop_root_path=cfg.bop_root_path,
             train_root_path = cfg.train_root_path,
             train_subdir=train_subdir.name,
@@ -282,8 +322,62 @@ class TrainCfg(BaseModel):
             img_size=cfg.img_size,
             last_epoch=0,
             epochs=cfg.epochs,
-            batch_size=cfg.batch_size
+            train_epoch_steps=cls._coalesce(cfg.train_epoch_steps, -1),
+            val_epoch_steps=cls._coalesce(cfg.val_epoch_steps, -1),
+            batch_size=cfg.batch_size,
+            learning_rate=cfg.learning_rate,
         )
+        return tcfg
+
+
+def tile_images(imgs_gt: torch.Tensor, imgs_pred: torch.Tensor, n_maps: int, max_imgs: int = 5) -> torch.Tensor:
+    img_sz = imgs_gt.shape[-1]
+    desc = f'imgs_gt.shape = {imgs_gt.shape}. imgs_pred.shape = {imgs_pred.shape}. n_maps = {n_maps}, max_imgs = {max_imgs}'
+    assert imgs_gt.shape[-2] == img_sz, desc
+    assert imgs_gt.shape[-3] // 3 == n_maps + 1, desc
+    assert imgs_pred.shape[-2] == imgs_pred.shape[-1] == img_sz, desc
+    assert imgs_pred.shape[-3] // 3 == n_maps, desc
+
+    nr, nc = min(imgs_gt.shape[0], max_imgs), 2 * n_maps + 1
+    height, width = nr * img_sz, nc * img_sz
+
+    slim = lambda ind: slice(ind * img_sz, (ind + 1) * img_sz)
+    slch = lambda ind: slice(ind * 3, (ind + 1) * 3)
+    res = torch.zeros(3, height, width, dtype=torch.float32)
+    for i in range(nr):
+        v_slice = slim(i)
+        # print(res[:, v_slice, slim(0)].shape, imgs_gt[i, slch(0)].shape)
+        res[:, v_slice, slim(0)] = imgs_gt[i, slch(0)]
+        for i_map in range(n_maps):
+            # First image is skipped
+            res[:, v_slice, slim(1 + i_map)] = imgs_gt[i, slch(1 + i_map)]
+            res[:, v_slice, slim(1 + n_maps + i_map)] = imgs_pred[i, slch(i_map)]
+    return res
+
+
+class MeanWin:
+    _window_size: int
+    _vals: list[float]
+    _full: bool = False
+    _i: int = 0
+
+    def __init__(self, window_size: int):
+        assert window_size > 0
+        self._window_size = window_size
+        self._vals = [0.0] * self._window_size
+
+    def add(self, val: float):
+        self._vals[self._i] = val
+        self._i +=1
+        if self._i == len(self._vals):
+            self._full = True
+            self._i = 0
+
+    def avg(self) -> float:
+        if self._full:
+            return sum(self._vals) / len(self._vals)
+        n = self._i + 1
+        return sum(self._vals[:n]) / n
 
 
 def main(cfg: Config) -> int:
@@ -292,9 +386,10 @@ def main(cfg: Config) -> int:
     print('Config:', cfg)
     print('Train Config:', tcfg)
     tcfg.create_paths()
-    tcfg.to_yaml(overwrite=False)
+    tcfg.to_yaml(overwrite=True)
 
     device = torch.device(cfg.device)
+    print(f'Pytorch device: {device}')
     skip_cache = False
     ds = BopDataset.from_dir(tcfg.bop_root_path, tcfg.dataset_name, 'train_pbr', shuffle=True, skip_cache=skip_cache)
     ds.shuffle()
@@ -302,7 +397,13 @@ def main(cfg: Config) -> int:
                                  keep_source_images=False, keep_cropped_images=False)
     ov_train, ov_val = objs_view.split((-1, 0.1))
     ov_train.set_aug_name(AUGNAME_DEFAULT)
-    it_buffer_sz = 10
+    it_buffer_sz = 5
+    n_train, n_val = len(ov_train), len(ov_val)
+    n_train_batches, n_val_batches = n_train, n_val
+    if tcfg.train_epoch_steps > 0:
+        n_train_batches = tcfg.train_epoch_steps
+    if tcfg.val_epoch_steps > 0:
+        n_val_batches = tcfg.val_epoch_steps
 
     inp_ch, n_cls = 9, 6
     backbone = 'vit_tiny_patch16_384'
@@ -326,7 +427,7 @@ def main(cfg: Config) -> int:
     }
     opt_cfg = {
         'opt': 'sgd',
-        'lr': 0.001,
+        'lr': tcfg.learning_rate,
         'weight_decay': 0.0,
         'momentum': 0.9,
         'clip_grad': None,
@@ -335,7 +436,7 @@ def main(cfg: Config) -> int:
         'min_lr': 1e-5,
         'poly_power': 0.9,
         'poly_step_size': 1,
-        'iter_max': tcfg.epochs * len(ov_train),
+        'iter_max': tcfg.epochs * n_train_batches,
         'iter_warmup': 0.0,
     }
     model = create_segmenter(model_cfg)
@@ -349,7 +450,8 @@ def main(cfg: Config) -> int:
 
     optimizer = create_optimizer(opt_args, model)
     lr_scheduler = create_scheduler(opt_args, optimizer)
-    criterion = torch.nn.CrossEntropyLoss()
+    # criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.MSELoss()
 
     if cfg.train_subdir == 'last' and tcfg.last_checkpoint_fpath.exists():
         checkpoint = torch.load(tcfg.last_checkpoint_fpath)
@@ -358,63 +460,91 @@ def main(cfg: Config) -> int:
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
         tcfg.last_epoch = checkpoint['last_epoch']
 
+    epochs_left = tcfg.epochs - tcfg.last_epoch
+    train_it = ov_train.get_batch_iterator(
+        n_batches=n_train_batches * epochs_left,
+        batch_size=tcfg.batch_size,
+        shuffle_between_loops=True,
+        multiprocess=True,
+        buffer_sz=it_buffer_sz,
+        return_tensors=True,
+        keep_source_images=False,
+        keep_cropped_images=False,
+    )
+    val_it = ov_val.get_batch_iterator(
+        n_batches=n_val_batches * epochs_left,
+        batch_size=tcfg.batch_size,
+        shuffle_between_loops=True,
+        multiprocess=True,
+        buffer_sz=it_buffer_sz,
+        return_tensors=True,
+        keep_source_images=False,
+        keep_cropped_images=False,
+    )
+
+    tbsw = tb.SummaryWriter(log_dir=str(tcfg.train_path))
     num_updates = 0
     val_loss = None
     for epoch in range(tcfg.last_epoch + 1, tcfg.epochs + 1):
-        train_it = ov_train.get_batch_iterator(
-            batch_size=tcfg.batch_size,
-            shuffle_between_loops=True,
-            multiprocess=True,
-            buffer_sz=it_buffer_sz,
-            return_tensors=True,
-            keep_source_images=False,
-            keep_cropped_images=False,
-        )
-        pbar = trange(len(ov_train), desc=f'Epoch {epoch}', unit='batch')
+        pbar = trange(n_train_batches, desc=f'Epoch {epoch}', unit='batch')
         model.train()
-        for step, gt_item in zip(iter(pbar), train_it):
+        train_loss_win = MeanWin(5)
+        for step in pbar:
+            gt_item = next(train_it)
             x = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names, gt_item.imgs_crop_tn)
             y_gt = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names)
             x, y_gt = x.to(device), y_gt.to(device)
             y_pred = model.forward(x)
             loss: torch.Tensor = criterion(y_pred, y_gt)
-
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             num_updates += 1
             lr_scheduler.step_update(num_updates=num_updates)
             lr = optimizer.param_groups[0]['lr']
-            pbar.set_postfix_str(f'Train. loss: {loss.item():.4f}. lr: {lr:.6f}')
+            pbar.set_postfix_str(f'Train. loss: {loss.item():.6f}. lr: {lr:.6f}')
+            train_loss_win.add(loss.item())
+
+            if step == 0 and epoch == 1:
+                img_vis = tile_images(x, y_pred, len(gt_item.maps_names))
+                tbsw.add_image('Img/Train', img_vis, epoch - 1)
+                tbsw.add_scalar('Params/LearningRate', lr, epoch)
+            elif step == n_train_batches - 1:
+                img_vis = tile_images(x, y_pred, len(gt_item.maps_names))
+                tbsw.add_image('Img/Train', img_vis, epoch)
 
         pbar.close()
+        tbsw.add_scalar('Loss/Train', train_loss_win.avg(), epoch)
+        lr = optimizer.param_groups[0]['lr']
+        tbsw.add_scalar('Params/LearningRate', lr, epoch)
 
-        val_it = ov_val.get_batch_iterator(
-            batch_size=tcfg.batch_size,
-            shuffle_between_loops=True,
-            multiprocess=True,
-            buffer_sz=it_buffer_sz,
-            return_tensors=True,
-            keep_source_images=False,
-            keep_cropped_images=False,
-        )
-        pbar = trange(len(ov_train), desc=f'Epoch {epoch}. Val', unit='batch')
+        pbar = trange(n_val_batches, desc=f'Epoch {epoch}. Val', unit='batch')
         model.eval()
-        loss_avg = 0
-        for step, gt_item in zip(iter(pbar), val_it):
+        val_loss_avg = 0
+        for step in pbar:
+            gt_item = next(val_it)
             x = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names, gt_item.imgs_crop_tn)
             y_gt = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names)
+            x, y_gt = x.to(device), y_gt.to(device)
             y_pred = model.forward(x)
             loss: torch.Tensor = criterion(y_pred, y_gt)
-            pbar.set_postfix_str(f'Val. loss: {loss.item():.4f}')
-            loss_avg += loss.item()
-        pbar.close()
-        loss_avg /= len(ov_val)
-        print(f'Val loss avg: {loss_avg:.4f}')
+            pbar.set_postfix_str(f'Val. loss: {loss.item():.6f}')
+            val_loss_avg += loss.item()
 
+            if step == n_val_batches - 1:
+                img_vis = tile_images(x, y_pred, len(gt_item.maps_names))
+                tbsw.add_image('Img/Val', img_vis, epoch)
+
+        pbar.close()
+        val_loss_avg /= n_val_batches
+        tbsw.add_scalar('Loss/Val', val_loss_avg, epoch)
+
+        print(f'Train loss: {train_loss_win:.6f}. Val loss: {val_loss_avg:.6f}')
         best = False
-        if val_loss is None or loss_avg < val_loss:
-            val_loss = loss_avg
+        if val_loss is None or val_loss_avg < val_loss:
+            val_loss_str = f'{val_loss}' if val_loss is None else f'{val_loss:.6f}'
+            print(f'Val min loss change: {val_loss_str} --> {val_loss_avg:.6f}')
+            val_loss = val_loss_avg
             best = True
 
         checkpoint = {
@@ -424,13 +554,15 @@ def main(cfg: Config) -> int:
             'last_epoch': epoch,
             'best_val_loss': val_loss,
         }
-        print(f'Saving checkpoint in {tcfg.last_checkpoint_fpath}')
+        print(f'Saving checkpoint to {tcfg.last_checkpoint_fpath}')
         torch.save(checkpoint, tcfg.last_checkpoint_fpath)
 
         if best:
-            print(f'New val loss minimum: {loss_avg:.4f}. Saving checkpoint to {tcfg.best_checkpoint_fpath}')
+            print(f'New val loss minimum: {val_loss_avg:.6f}. Saving checkpoint to {tcfg.best_checkpoint_fpath}')
             shutil.copyfile(tcfg.last_checkpoint_fpath, tcfg.best_checkpoint_fpath)
 
+    train_it.close()
+    val_it.close()
     return 0
 
 

@@ -70,6 +70,8 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
         self.sync_workers()
 
     def pool_cb(self, res_cont: BatchResultContainer):
+        if self.stopped:
+            return
         self.id_to_results[res_cont.batch_id] = res_cont
         del self.id_to_params[res_cont.batch_id]
         with self.cv:

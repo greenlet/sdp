@@ -99,9 +99,11 @@ def crop_apply_mask(imgs: list[np.ndarray], mask: np.ndarray, bbox_ltwh: np.ndar
 
 
 def img_to_tensor(img: np.ndarray, mask: Optional[np.ndarray] = None) -> torch.Tensor:
-    if mask is not None:
-        img[~mask] = 0
     img = img.astype(np.float32) / 255
+    if mask is not None:
+        # u = np.unique(mask)
+        # assert len(u) == 2 and u[0] == 0 and u[1] > 0
+        img[mask == 0] = 0
     return torch.from_numpy(img)
 
 
@@ -393,8 +395,12 @@ class BopView:
         if multiprocess:
             pool = self.ds.acquire_pool()
             bproc = BatchProcessor(load_imgs_objs_gt, pool, batch_it, buffer_sz=buffer_sz)
-            for res in bproc:
-                yield res
+            try:
+                for res in bproc:
+                    yield res
+            except GeneratorExit:
+                bproc.stop()
+                self.ds.release_pool()
         else:
             for params in batch_it:
                 res = load_imgs_objs_gt(params)
