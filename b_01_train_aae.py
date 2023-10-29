@@ -1,26 +1,19 @@
 import argparse
-import math
 import re
-import traceback
-from dataclasses import dataclass
+import shutil
+import torch
+import torch.utils.tensorboard as tb
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
-import shutil
-from typing import Optional, Union, Any
-
-import numpy as np
-import torch
-import torchvision as tv
-import torch.utils.tensorboard as tb
-from tqdm import trange
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 from pydantic_cli import run_and_exit
-from pydantic_yaml import parse_yaml_raw_as, to_yaml_str, parse_yaml_file_as
+from tqdm import trange
+from typing import Optional, Any
 
 from sdp.ds.bop_dataset import BopDataset, AUGNAME_DEFAULT
 from sdp.models.segmenter.factory import create_segmenter
 from sdp.utils.tensor import stack_imgs_maps
+from sdp.utils.train import MeanWin, ArgsAaeBase, ConfigAaeTrain
 from segm.optim.factory import create_optimizer, create_scheduler
 
 
@@ -37,19 +30,7 @@ class TrainSubdirType(str, Enum):
         return None
 
 
-class Config(BaseModel):
-    bop_root_path: Path = Field(
-        ...,
-        required=True,
-        description='Path to BOP datasets (containing datasets: itodd, tless, etc.)',
-        cli=('--bop-root-path',),
-    )
-    train_root_path: Path = Field(
-        ...,
-        required=True,
-        description='Path to train root directory. New train processes will create subdirectories in it.',
-        cli=('--train-root-path',),
-    )
+class ArgsAaeTrain(ArgsAaeBase):
     dataset_name: Optional[str] = Field(
         None,
         required=False,
@@ -67,6 +48,18 @@ class Config(BaseModel):
         required=False,
         description='Encoder input and Decoder output image size.',
         cli=('--img-size',),
+    )
+    train_batch_size: Optional[int] = Field(
+        None,
+        required=False,
+        description='Training batch size (number of images for single training forward/backward network run).',
+        cli=('--train-batch-size',),
+    )
+    train_mp_queue_size: int = Field(
+        3,
+        required=False,
+        description='Train dataset multiprocess data loader queue size.',
+        cli=('--train-mp-queue-size',)
     )
     epochs: Optional[int] = Field(
         None,
@@ -88,13 +81,7 @@ class Config(BaseModel):
                     'the number of steps will be a number of batches contained in dataset. (default is -1)',
         cli=('--val-epoch-steps',),
     )
-    batch_size: Optional[int] = Field(
-        None,
-        required=False,
-        description='Training batch size (number of images for single forward/backward network iteration).',
-        cli=('--batch-size',),
-    )
-    train_subdir: Optional[str] = Field(
+    train_subdir: str = Field(
         'last_or_new',
         required=False,
         description=f''
@@ -108,12 +95,6 @@ class Config(BaseModel):
         f'New one is generated if none found; for the values "new", "last", "last_or_new" DATASET_NAME, OBJ_ID, '
         f'IMG_SIZE must be set.',
         cli=('--train-subdir',),
-    )
-    device: str = Field(
-        'cpu',
-        required=False,
-        description='Device to run training on. Can have values: "cpu", "gpu"',
-        cli=('--device',)
     )
     learning_rate: float = Field(
         0.001,
@@ -159,175 +140,128 @@ def parse_train_subdir(subdir: str, silent: bool = False) -> Optional[tuple[str,
     return ds_name, obj_id, img_sz, dt
 
 
-class TrainCfg(BaseModel):
-    _fname: str = 'train_config.yaml'
-    _best_checkpoint_fname: str = 'best.pth'
-    _last_checkpoint_fname: str = 'last.pth'
-    bop_root_path: Path
-    train_root_path: Path
-    train_subdir: str
-    dataset_name: str
+def empty_in_cfg(args: ArgsAaeTrain, must_attrs: list[str]) -> str:
+    err_attrs = []
+    for attr in must_attrs:
+        if not hasattr(args, attr) or getattr(args, attr) is None:
+            err_attrs.append(attr)
+    if err_attrs:
+        return ', '.join(err_attrs)
+    return ''
+
+
+def check_attrs(args: ArgsAaeTrain, reason: str, *attrs: str):
+    err_attrs = empty_in_cfg(args, list(attrs))
+    if err_attrs:
+        err_str = f'When {reason} following parameters must be set: {err_attrs}'
+        raise Exception(err_str)
+
+
+def check_attrs_short(args: ArgsAaeTrain, reason: str):
+    check_attrs(args, reason, 'dataset_name', 'obj_id', 'img_size')
+
+
+def check_attrs_full(args: ArgsAaeTrain, reason: str):
+    check_attrs(args, reason, 'dataset_name', 'obj_id', 'img_size', 'epochs', 'train_batch_size')
+
+
+class TrainSubdir(BaseModel):
+    ds_name: str
     obj_id: int
+    img_sz: int
     dt: datetime
-    img_size: int
-    last_epoch: int
-    epochs: int
-    train_epoch_steps: int
-    val_epoch_steps: int
-    batch_size: int
-    learning_rate: float
-    train_path: Path
-    last_checkpoint_fpath: Path
-    best_checkpoint_fpath: Path
+    name: str
 
     def __init__(self, **kwargs):
-        kwargs['bop_root_path'] = Path(kwargs['bop_root_path'])
-        kwargs['train_root_path'] = Path(kwargs['train_root_path'])
-        train_path = kwargs['train_root_path'] / kwargs['train_subdir']
-        kwargs['train_path'] = train_path
-        kwargs['last_checkpoint_fpath'] = train_path / self._last_checkpoint_fname
-        kwargs['best_checkpoint_fpath'] = train_path / self._best_checkpoint_fname
+        if 'dt' not in kwargs:
+            kwargs['dt'] = datetime.now()
+        kwargs['name'] = format_train_subdir(**kwargs)
         super().__init__(**kwargs)
 
-    @classmethod
-    def from_yaml(cls, fpath: Optional[Path] = None) -> 'TrainCfg':
-        if fpath.is_dir():
-            fpath = fpath / cls._fname
-        return parse_yaml_file_as(TrainCfg, fpath)
 
-    def to_yaml(self, fpath: Optional[Path] = None, overwrite: bool = True):
-        if fpath is None:
-            fpath = self.train_path / self._fname
-        elif fpath.is_dir():
-            fpath /= self._fname
-        if fpath.exists() and not overwrite:
-            return
-        with open(fpath, 'w') as f:
-            f.write(to_yaml_str(self, indent=2))
+def find_last_train_subdir(args: ArgsAaeTrain) -> Optional[TrainSubdir]:
+    last_subdir: Optional[TrainSubdir] = None
+    for tpath in args.train_root_path.iterdir():
+        config_fpath = tpath / ConfigAaeTrain._fname
+        if not tpath.is_dir() or not config_fpath.exists():
+            continue
+        subdir_params = parse_train_subdir(tpath.name, silent=True)
+        if not subdir_params:
+            continue
+        ds_name, obj_id, img_sz, dt = subdir_params
+        if last_subdir is None or last_subdir.dt < dt:
+            last_subdir = TrainSubdir(ds_name=ds_name, obj_id=obj_id, img_sz=img_sz, dt=dt)
+    return last_subdir
 
-    def create_paths(self):
-        self.train_path.mkdir(parents=True, exist_ok=True)
 
-    @classmethod
-    def _empty_in_cfg(cls, cfg: Config, must_attrs: list[str]) -> str:
-        err_attrs = []
-        for attr in must_attrs:
-            if not hasattr(cfg, attr) or getattr(cfg, attr) is None:
-                err_attrs.append(attr)
-        if err_attrs:
-            return ', '.join(err_attrs)
-        return ''
+def coalesce(val: Optional[Any], default: Any):
+    return val if val is not None else default
 
-    @classmethod
-    def _check_attrs(cls, cfg: Config, reason: str, *attrs: str):
-        err_attrs = cls._empty_in_cfg(cfg, list(attrs))
-        if err_attrs:
-            err_str = f'When {reason} following parameters must be set: {err_attrs}'
-            raise Exception(err_str)
 
-    @classmethod
-    def _check_attrs_short(cls, cfg: Config, reason: str):
-        cls._check_attrs(cfg, reason, 'dataset_name', 'obj_id', 'img_size')
+def update_tcfg(tcfg: 'ConfigAaeTrain', args: ArgsAaeTrain):
+    tcfg.epochs = coalesce(args.epochs, tcfg.epochs)
+    tcfg.train_epoch_steps = coalesce(args.train_epoch_steps, tcfg.train_epoch_steps)
+    tcfg.val_epoch_steps = coalesce(args.val_epoch_steps, tcfg.val_epoch_steps)
+    tcfg.train_batch_size = coalesce(args.train_batch_size, tcfg.train_batch_size)
+    tcfg.eval_batch_size = coalesce(args.eval_batch_size, tcfg.eval_batch_size)
 
-    @classmethod
-    def _check_attrs_full(cls, cfg: Config, reason: str):
-        cls._check_attrs(cfg, reason, 'dataset_name', 'obj_id', 'img_size', 'epochs', 'batch_size')
 
-    class _TrainSubdir(BaseModel):
-        ds_name: str
-        obj_id: int
-        img_sz: int
-        dt: datetime
-        name: str
+def tcfg_from_args(args: ArgsAaeTrain) -> 'ConfigAaeTrain':
+    train_subdir_src = TrainSubdirType.from_str(args.train_subdir)
+    train_subdir: Optional[TrainSubdir] = None
+    if train_subdir_src == TrainSubdirType.New:
+        check_attrs_full(args, f'train_subdir = {train_subdir_src}')
+        train_subdir = TrainSubdir(ds_name=args.dataset_name, obj_id=args.obj_id, img_sz=args.img_size)
+    elif train_subdir_src == TrainSubdirType.Last:
+        check_attrs_short(args, f'train_subdir = {train_subdir_src}')
+        train_subdir = find_last_train_subdir(args)
+        if train_subdir is None:
+            raise Exception(f'Cannot find last subdir in {args.train_root_path} for cfg: {args}')
+    elif train_subdir_src == TrainSubdirType.LastOrNew:
+        check_attrs_short(args, f'train_subdir = {train_subdir_src}')
+        train_subdir = find_last_train_subdir(args)
+        if train_subdir is None:
+            check_attrs_full(args, f'last subdir not found for train_subdir = {train_subdir_src}')
+            train_subdir = TrainSubdir(ds_name=args.dataset_name, obj_id=args.obj_id, img_sz=args.img_size)
+    else:
+        tpath = args.train_root_path / args.train_subdir
+        if not tpath.exists():
+            raise Exception(f'Directory {tpath} does not exist')
+        fpath = tpath / ConfigAaeTrain._fname
+        if not fpath.exists():
+            raise Exception(f'Config file {fpath} does not exist')
+        ds_name, obj_id, img_sz, dt = parse_train_subdir(args.train_subdir)
+        tcfg = ConfigAaeTrain.from_yaml(fpath)
+        assert ds_name == tcfg.dataset_name and obj_id == tcfg.obj_id and img_sz == tcfg.img_size and dt == tcfg.dt,\
+            f'Train subdir "{train_subdir}" does not match config parameters: {tcfg}'
 
-        def __init__(self, **kwargs):
-            if 'dt' not in kwargs:
-                kwargs['dt'] = datetime.now()
-            kwargs['name'] = format_train_subdir(**kwargs)
-            super().__init__(**kwargs)
-
-    @classmethod
-    def _find_last_train_subdir(cls, cfg: Config) -> Optional[_TrainSubdir]:
-        last_subdir: Optional[cls._TrainSubdir] = None
-        for tpath in cfg.train_root_path.iterdir():
-            config_fpath = tpath / cls._fname
-            if not tpath.is_dir() or not config_fpath.exists():
-                continue
-            subdir_params = parse_train_subdir(tpath.name, silent=True)
-            if not subdir_params:
-                continue
-            ds_name, obj_id, img_sz, dt = subdir_params
-            if last_subdir is None or last_subdir.dt < dt:
-                last_subdir = cls._TrainSubdir(ds_name=ds_name, obj_id=obj_id, img_sz=img_sz, dt=dt)
-        return last_subdir
-
-    @classmethod
-    def _coalesce(cls, val: Optional[Any], default: Any):
-        return val if val is not None else default
-
-    @classmethod
-    def _update_tcfg(cls, tcfg: 'TrainCfg', cfg: Config):
-        tcfg.epochs = cls._coalesce(cfg.epochs, tcfg.epochs)
-        tcfg.train_epoch_steps = cls._coalesce(cfg.train_epoch_steps, tcfg.train_epoch_steps)
-        tcfg.val_epoch_steps = cls._coalesce(cfg.val_epoch_steps, tcfg.val_epoch_steps)
-        tcfg.batch_size = cls._coalesce(cfg.batch_size, tcfg.batch_size)
-
-    @classmethod
-    def from_cfg(cls, cfg: Config) -> 'TrainCfg':
-        train_subdir_src = TrainSubdirType.from_str(cfg.train_subdir)
-        train_subdir: Optional[cls._TrainSubdir] = None
-        if train_subdir_src == TrainSubdirType.New:
-            cls._check_attrs_full(cfg, f'train_subdir = {train_subdir_src}')
-            train_subdir = cls._TrainSubdir(ds_name=cfg.dataset_name, obj_id=cfg.obj_id, img_sz=cfg.img_size)
-        elif train_subdir_src == TrainSubdirType.Last:
-            cls._check_attrs_short(cfg, f'train_subdir = {train_subdir_src}')
-            train_subdir = cls._find_last_train_subdir(cfg)
-            if train_subdir is None:
-                raise Exception(f'Cannot find last subdir in {cfg.train_root_path} for cfg: {cfg}')
-        elif train_subdir_src == TrainSubdirType.LastOrNew:
-            cls._check_attrs_short(cfg, f'train_subdir = {train_subdir_src}')
-            train_subdir = cls._find_last_train_subdir(cfg)
-            if train_subdir is None:
-                cls._check_attrs_full(cfg, f'last subdir not found for train_subdir = {train_subdir_src}')
-                train_subdir = cls._TrainSubdir(ds_name=cfg.dataset_name, obj_id=cfg.obj_id, img_sz=cfg.img_size)
-        else:
-            tpath = cfg.train_root_path / cfg.train_subdir
-            if not tpath.exists():
-                raise Exception(f'Directory {tpath} does not exist')
-            fpath = tpath / cls._fname
-            if not fpath.exists():
-                raise Exception(f'Config file {fpath} does not exist')
-            ds_name, obj_id, img_sz, dt = parse_train_subdir(cfg.train_subdir)
-            tcfg = cls.from_yaml(fpath)
-            assert ds_name == tcfg.dataset_name and obj_id == tcfg.obj_id and img_sz == tcfg.img_size and dt == tcfg.dt,\
-                f'Train subdir "{train_subdir}" does not match config parameters: {tcfg}'
-
-            cls._update_tcfg(tcfg, cfg)
-            return tcfg
-
-        tpath = cfg.train_root_path / train_subdir.name
-        fpath = tpath / cls._fname
-        if fpath.exists():
-            tcfg = cls.from_yaml(fpath)
-            cls._update_tcfg(tcfg, cfg)
-            return tcfg
-
-        tcfg = TrainCfg(
-            bop_root_path=cfg.bop_root_path,
-            train_root_path = cfg.train_root_path,
-            train_subdir=train_subdir.name,
-            dataset_name=cfg.dataset_name,
-            obj_id=cfg.obj_id,
-            dt=train_subdir.dt,
-            img_size=cfg.img_size,
-            last_epoch=0,
-            epochs=cfg.epochs,
-            train_epoch_steps=cls._coalesce(cfg.train_epoch_steps, -1),
-            val_epoch_steps=cls._coalesce(cfg.val_epoch_steps, -1),
-            batch_size=cfg.batch_size,
-            learning_rate=cfg.learning_rate,
-        )
+        update_tcfg(tcfg, args)
         return tcfg
+
+    tpath = args.train_root_path / train_subdir.name
+    fpath = tpath / ConfigAaeTrain._fname
+    if fpath.exists():
+        tcfg = ConfigAaeTrain.from_yaml(fpath)
+        update_tcfg(tcfg, args)
+        return tcfg
+
+    tcfg = ConfigAaeTrain(
+        bop_root_path=args.bop_root_path,
+        train_root_path = args.train_root_path,
+        train_subdir=train_subdir.name,
+        dataset_name=args.dataset_name,
+        obj_id=args.obj_id,
+        dt=train_subdir.dt,
+        img_size=args.img_size,
+        last_epoch=0,
+        epochs=args.epochs,
+        train_epoch_steps=coalesce(args.train_epoch_steps, -1),
+        val_epoch_steps=coalesce(args.val_epoch_steps, -1),
+        train_batch_size=args.train_batch_size,
+        eval_batch_size=coalesce(args.eval_batch_size, args.train_batch_size),
+        learning_rate=args.learning_rate,
+    )
+    return tcfg
 
 
 def tile_images(imgs_gt: torch.Tensor, imgs_pred: torch.Tensor, n_maps: int, max_imgs: int = 5) -> torch.Tensor:
@@ -355,49 +289,23 @@ def tile_images(imgs_gt: torch.Tensor, imgs_pred: torch.Tensor, n_maps: int, max
     return res
 
 
-class MeanWin:
-    _window_size: int
-    _vals: list[float]
-    _full: bool = False
-    _i: int = 0
-
-    def __init__(self, window_size: int):
-        assert window_size > 0
-        self._window_size = window_size
-        self._vals = [0.0] * self._window_size
-
-    def add(self, val: float):
-        self._vals[self._i] = val
-        self._i +=1
-        if self._i == len(self._vals):
-            self._full = True
-            self._i = 0
-
-    def avg(self) -> float:
-        if self._full:
-            return sum(self._vals) / len(self._vals)
-        n = self._i + 1
-        return sum(self._vals[:n]) / n
-
-
-def main(cfg: Config) -> int:
-    cfg.train_root_path.mkdir(parents=True, exist_ok=True)
-    tcfg = TrainCfg.from_cfg(cfg)
-    print('Config:', cfg)
+def main(args: ArgsAaeTrain) -> int:
+    args.train_root_path.mkdir(parents=True, exist_ok=True)
+    tcfg = tcfg_from_args(args)
+    print('Config:', args)
     print('Train Config:', tcfg)
     tcfg.create_paths()
     tcfg.to_yaml(overwrite=True)
 
-    device = torch.device(cfg.device)
+    device = torch.device(args.device)
     print(f'Pytorch device: {device}')
     skip_cache = False
-    ds = BopDataset.from_dir(tcfg.bop_root_path, tcfg.dataset_name, 'train_pbr', shuffle=True, skip_cache=skip_cache)
-    ds.shuffle()
-    objs_view = ds.get_objs_view(tcfg.obj_id, tcfg.batch_size, tcfg.img_size, return_tensors=True,
+    ds = BopDataset.from_dir(tcfg.bop_root_path, tcfg.dataset_name, shuffle=True, skip_cache=skip_cache)
+    objs_view = ds.get_objs_view(tcfg.obj_id, tcfg.train_batch_size, tcfg.img_size, return_tensors=True,
                                  keep_source_images=False, keep_cropped_images=False)
     ov_train, ov_val = objs_view.split((-1, 0.1))
+    ov_val.set_batch_size(tcfg.eval_batch_size)
     ov_train.set_aug_name(AUGNAME_DEFAULT)
-    it_buffer_sz = 5
     n_train, n_val = len(ov_train), len(ov_val)
     n_train_batches, n_val_batches = n_train, n_val
     if tcfg.train_epoch_steps > 0:
@@ -453,8 +361,10 @@ def main(cfg: Config) -> int:
     # criterion = torch.nn.CrossEntropyLoss()
     criterion = torch.nn.MSELoss()
 
-    if cfg.train_subdir == 'last' and tcfg.last_checkpoint_fpath.exists():
+    if tcfg.last_checkpoint_fpath.exists():
+        print(f'Loading checkpoint from {tcfg.last_checkpoint_fpath}')
         checkpoint = torch.load(tcfg.last_checkpoint_fpath)
+        print(f'Checkpoint keys: {list(checkpoint.keys())}')
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
@@ -463,20 +373,20 @@ def main(cfg: Config) -> int:
     epochs_left = tcfg.epochs - tcfg.last_epoch
     train_it = ov_train.get_batch_iterator(
         n_batches=n_train_batches * epochs_left,
-        batch_size=tcfg.batch_size,
+        batch_size=tcfg.train_batch_size,
         shuffle_between_loops=True,
-        multiprocess=True,
-        buffer_sz=it_buffer_sz,
+        multiprocess=args.ds_mp_loading,
+        mp_queue_size=args.train_mp_queue_size,
         return_tensors=True,
         keep_source_images=False,
         keep_cropped_images=False,
     )
     val_it = ov_val.get_batch_iterator(
         n_batches=n_val_batches * epochs_left,
-        batch_size=tcfg.batch_size,
+        batch_size=tcfg.eval_batch_size,
         shuffle_between_loops=True,
-        multiprocess=True,
-        buffer_sz=it_buffer_sz,
+        multiprocess=args.ds_mp_loading,
+        mp_queue_size=args.eval_mp_queue_size,
         return_tensors=True,
         keep_source_images=False,
         keep_cropped_images=False,
@@ -539,7 +449,7 @@ def main(cfg: Config) -> int:
         val_loss_avg /= n_val_batches
         tbsw.add_scalar('Loss/Val', val_loss_avg, epoch)
 
-        print(f'Train loss: {train_loss_win:.6f}. Val loss: {val_loss_avg:.6f}')
+        print(f'Train loss: {train_loss_win.avg():.6f}. Val loss: {val_loss_avg:.6f}')
         best = False
         if val_loss is None or val_loss_avg < val_loss:
             val_loss_str = f'{val_loss}' if val_loss is None else f'{val_loss:.6f}'
@@ -550,7 +460,7 @@ def main(cfg: Config) -> int:
         checkpoint = {
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'lr_schedule': lr_scheduler.state_dict(),
+            'lr_scheduler': lr_scheduler.state_dict(),
             'last_epoch': epoch,
             'best_val_loss': val_loss,
         }
@@ -567,6 +477,6 @@ def main(cfg: Config) -> int:
 
 
 if __name__ == '__main__':
-    run_and_exit(Config, main, 'Train Augmented Auto Encoder for single object.')
+    run_and_exit(ArgsAaeTrain, main, 'Train Augmented Auto Encoder for single object.')
 
 

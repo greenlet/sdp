@@ -13,7 +13,7 @@ from segm.model.decoder import MaskTransformer
 from segm.model.segmenter import Segmenter
 
 
-def create_vit(model_cfg):
+def create_vit(model_cfg) -> VisionTransformer:
     model_cfg = model_cfg.copy()
     backbone = model_cfg.pop("backbone")
 

@@ -184,7 +184,7 @@ class GtImgsMasks:
         imgs_crop, masks_crop, maps_crop = self.imgs_crop, self.masks_crop, self.maps_crop
         imgs_crop_tn, maps_crop_tn = [], []
         if return_tensors:
-            assert len(imgs_crop) > 0
+            assert len(imgs_crop) > 0 or len(imgs_crop_tn) > 0 or len(imgs) > 0
             imgs_crop_tn = imgs_list_to_tensors(imgs_crop, masks_crop)
             maps_crop_tn = imgs_dict_to_tensors(maps_crop, masks_crop)
         if not keep_source_images:
@@ -351,7 +351,7 @@ class BopView:
         return self.get_gt_imgs_masks(i, self.batch_size)
 
     def get_batch_iterator(self, n_batches: Optional[int] = None, multiprocess: bool = False, batch_size: Optional[int] = None,
-                           drop_last: bool = False, shuffle_between_loops: bool = True, buffer_sz: int = 3, aug_name: Optional[str] = None,
+                           drop_last: bool = False, shuffle_between_loops: bool = True, mp_queue_size: int = 3, aug_name: Optional[str] = None,
                            return_tensors: Optional[bool] = None, keep_source_images: Optional[bool] = None, keep_cropped_images: Optional[bool] = None)\
             -> Generator[GtImgsMasks, None, None]:
         batch_size = batch_size or self.batch_size
@@ -394,11 +394,14 @@ class BopView:
         batch_it = iter(batch_gen())
         if multiprocess:
             pool = self.ds.acquire_pool()
-            bproc = BatchProcessor(load_imgs_objs_gt, pool, batch_it, buffer_sz=buffer_sz)
+            bproc = BatchProcessor(load_imgs_objs_gt, pool, batch_it, queue_size=mp_queue_size)
             try:
                 for res in bproc:
                     yield res
-            except GeneratorExit:
+            # Covered by finally. Left here for reference.
+            # except GeneratorExit:
+            #     bproc.stop()
+            finally:
                 bproc.stop()
                 self.ds.release_pool()
         else:
@@ -536,10 +539,15 @@ class BopDataset:
         self.df_obj = df_obj
         self.shuffled = shuffled
         self.maps_names = list(maps_names)
-    
+        self.ds_img_np_cols = BopDataset.ds_img_np_cols.copy()
+        self.ds_obj_np_cols = BopDataset.ds_obj_np_cols.copy()
+
     @classmethod
-    def get_cache_path(cls, bop_path: Path, ds_name: str) -> Path:
+    def _get_cache_path(cls, bop_path: Path, ds_name: str) -> Path:
         return bop_path / ds_name / cls.cache_subdir
+
+    def get_cache_path(self) -> Path:
+        return self.bop_path / self.ds_name / self.cache_subdir
 
     # Returns if cache was written
     def shuffle(self) -> bool:
@@ -572,7 +580,7 @@ class BopDataset:
         return df
 
     def write_cache(self):
-        cache_path = self.get_cache_path(self.bop_path, self.ds_name)
+        cache_path = self._get_cache_path(self.bop_path, self.ds_name)
         ds_img_fpath = cache_path / self.ds_img_cache_fname
         ds_obj_fpath = cache_path / self.ds_obj_cache_fname
         ds_info_fpath = cache_path / self.ds_info_cache_fname
@@ -589,6 +597,8 @@ class BopDataset:
                 'ds_name': self.ds_name,
                 'ds_subdir': self.ds_subdir,
                 'shuffled': self.shuffled,
+                'ds_img_np_cols': self.ds_img_np_cols,
+                'ds_obj_np_cols': self.ds_obj_np_cols,
             }
             write_yaml(info, ds_info_fpath)
         except Exception as e:
@@ -627,11 +637,11 @@ class BopDataset:
             return None
 
     @classmethod
-    def from_dir(cls, bop_path: Path, ds_name: str, ds_subdir: str, shuffle: bool, skip_cache: bool = False,
+    def from_dir(cls, bop_path: Path, ds_name: str, shuffle: bool, ds_subdir: str = 'train_pbr', skip_cache: bool = False,
                  maps_names: tuple[str] = ('norm', 'noc')) -> 'BopDataset':
         ds_path = bop_path / ds_name
         train_path = ds_path / ds_subdir
-        cache_path = cls.get_cache_path(bop_path, ds_name)
+        cache_path = cls._get_cache_path(bop_path, ds_name)
         if skip_cache:
             print(f'Removing {cache_path}')
             shutil.rmtree(cache_path, ignore_errors=True)

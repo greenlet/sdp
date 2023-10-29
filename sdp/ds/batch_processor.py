@@ -1,6 +1,6 @@
 import multiprocessing as mpr
 import threading as thr
-import traceback
+import traceback as tb
 from typing import Optional, Generator, Callable, Any, Generic, TypeVar, Iterator
 
 TBatchParams = TypeVar('TBatchParams')
@@ -40,7 +40,8 @@ def process_batch(params_cont: BatchParamsContainer) -> BatchResultContainer:
         result = params_cont.worker_fn(params_cont.params)
         return BatchResultContainer(params_cont.batch_id, result)
     except Exception as ex:
-        tb_str = '\n'.join(traceback.format_stack())
+        # tb_str = '\n'.join(tb.format_stack())
+        tb_str = '\n'.join(tb.format_exception(ex))
         return BatchResultContainer(params_cont.batch_id, ex=ex, tb_str=tb_str)
 
 
@@ -51,17 +52,17 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
     pool: mpr.Pool
     params_it: Iterator[TBatchParams]
     preserve_order: bool = False
-    buffer_sz: int
+    queue_size: int
     next_id_in_order: int = -1
     stopped: bool = False
     cv: thr.Condition
 
     def __init__(self, worker_fn: TBatchWorker, pool: mpr.Pool, params_it: Iterator[TBatchParams],
-                 preserve_order: bool = False, buffer_sz: int = 3):
+                 preserve_order: bool = False, queue_size: int = 3):
         self.worker_fn = worker_fn
         self.id_to_params = {}
         self.id_to_results = {}
-        self.buffer_sz = buffer_sz
+        self.queue_size = queue_size
         self.pool = pool
         self.params_it = params_it
         self.preserve_order = preserve_order
@@ -85,7 +86,7 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
         if self.stopped:
             return
         n_sent, n_received = len(self.id_to_params), len(self.id_to_results)
-        for i in range(self.buffer_sz - n_sent - n_received):
+        for i in range(self.queue_size - n_sent - n_received):
             params = next(self.params_it, None)
             if params is None:
                 break
@@ -119,7 +120,7 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
         self.sync_workers()
         if res.ex:
             print(f'Batch {batch_id} error')
-            traceback.print_exception(res.ex)
+            # tb.print_exception(res.ex)
             print(res.tb_str)
         return res.result
 

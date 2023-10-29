@@ -18,3 +18,13 @@ with open('requirements.txt', 'w') as f:
     f.write('\n' * 2)
 
 
+def fn():
+    try:
+        print('try!')
+        y = None
+        x = 2 / (y - 3)
+    finally:
+        print('finally!')
+
+print('fn():')
+fn()
