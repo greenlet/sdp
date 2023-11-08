@@ -3,7 +3,7 @@ import re
 import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Union, Optional
 
 from imageio.v3 import imread
 
@@ -182,13 +182,19 @@ def read_masks(data_path: Path, scene_id: int, masks_subdir: str, img_id: int, n
     return res
 
 
-def read_meshes(meshes_path: Path) -> dict[int, Mesh]:
+def read_meshes(meshes_path: Path, ids: Optional[Union[int, list, tuple]] = None) -> dict[int, Mesh]:
+    if type(ids) is int:
+        ids = [ids]
+    if ids is not None:
+        ids = set(ids)
     res = {}
     for fpath in meshes_path.iterdir():
         m = MESH_FNAME_PAT.match(fpath.name)
         if not m:
             continue
         obj_id = int(m.group(1))
+        if ids is not None and obj_id not in ids:
+            continue
         res[obj_id] = Mesh.read_mesh(fpath, 1e-3)
     return res
 

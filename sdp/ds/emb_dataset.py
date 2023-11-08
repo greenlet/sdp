@@ -1,23 +1,8 @@
-from enum import Enum
-
-import multiprocessing as mpr
-import shutil
-import threading as thr
+import numpy as np
 import traceback
 from pathlib import Path
-from typing import Optional, Union, Generator, Callable, Any, Generic, TypeVar, Iterator
+from typing import Optional
 
-import cv2
-import imgaug.augmenters as iaa
-import torch
-from imageio.v3 import imread
-import numpy as np
-import pandas as pd
-
-from sdp.ds.batch_processor import BatchProcessor
-from sdp.ds.bop_data import read_scene_camera, read_scene_gt, read_scene_gt_info, id_to_str
-from sdp.utils.common import SplitsType, split_range
-from sdp.utils.data import read_yaml, write_yaml
 from sdp.utils.train import ConfigAaeTrain
 
 

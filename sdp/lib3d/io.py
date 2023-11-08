@@ -16,11 +16,12 @@ class Mesh:
     def __init__(self, mesh_o3d: o3d.geometry.TriangleMesh, mul_to_meters: float = 1.0):
         self.mesh_o3d = mesh_o3d
         self.mul_to_meters = mul_to_meters
+        self.mesh_o3d.scale(self.mul_to_meters, np.zeros(3))
 
     @property
     def vertices(self) -> np.ndarray:
         if self._vertices is None:
-            self._vertices = np.asarray(self.mesh_o3d.vertices) * self.mul_to_meters
+            self._vertices = np.asarray(self.mesh_o3d.vertices)
         return self._vertices
 
     @property

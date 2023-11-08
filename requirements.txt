@@ -7,6 +7,7 @@ jupyter
 matplotlib
 mmcv
 numpy
+open3d
 opencv-python
 pandas
 pydantic-cli

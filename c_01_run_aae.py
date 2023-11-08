@@ -1,31 +1,17 @@
-import os
-
-import argparse
-import math
-import re
-import traceback
-from dataclasses import dataclass
-from datetime import datetime
-from enum import Enum
-from pathlib import Path
-import shutil
-from typing import Optional, Union, Any
-
 import numpy as np
+import os
 import torch
-import torchvision as tv
-import torch.utils.tensorboard as tb
-from tqdm import trange
-from pydantic import BaseModel, Field, validator
+from enum import Enum
+from pydantic import Field
 from pydantic_cli import run_and_exit
-from pydantic_yaml import parse_yaml_raw_as, to_yaml_str, parse_yaml_file_as
+from tqdm import trange
+from typing import Optional
 
-from sdp.ds.bop_dataset import BopDataset, AUGNAME_DEFAULT
+from sdp.ds.bop_dataset import BopDataset
 from sdp.ds.emb_dataset import EmbDataset
-from sdp.models.segmenter.factory import create_segmenter, create_vit
+from sdp.models.segmenter.factory import create_vit
 from sdp.utils.tensor import stack_imgs_maps
-from sdp.utils.train import MeanWin, ArgsAaeBase, ConfigAaeTrain
-from segm.optim.factory import create_optimizer, create_scheduler
+from sdp.utils.train import ArgsAaeBase, ConfigAaeTrain
 
 
 class TrainSubdirType(str, Enum):
@@ -105,19 +91,21 @@ def main(args: ArgsAaeRun) -> int:
     encoder.eval()
 
     emb_sz = encoder.n_cls
-    n_items = n_batches * tcfg.eval_batch_size
+    n_items = min(n_batches * tcfg.eval_batch_size, len(objs_view))
     obj_ds_ids = np.empty(n_items, int)
     embs = np.empty((n_items, emb_sz), np.float32)
 
+    off = 0
     for step in pbar:
         gt_item = next(val_it)
         x = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names, gt_item.imgs_crop_tn)
         x = x.to(device)
         y = encoder.forward(x)
         y = y.detach().to('cpu')
-        inds = slice(step * tcfg.eval_batch_size, (step + 1) * tcfg.eval_batch_size)
+        inds = slice(off, off + y.shape[0])
         obj_ds_ids[inds] = gt_item.df_obj.index
         embs[inds] = y
+        off += y.shape[0]
 
     assert set(objs_view.ids[:n_batches * tcfg.eval_batch_size]) == set(obj_ds_ids)
 

@@ -1,3 +1,5 @@
+import numpy as np
+import torch
 from datetime import datetime
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -119,4 +121,24 @@ class ConfigAaeTrain(BaseModel):
     def create_paths(self):
         self.train_path.mkdir(parents=True, exist_ok=True)
 
+
+def img_to_tensor(img: np.ndarray, mask: Optional[np.ndarray] = None) -> torch.Tensor:
+    img = img.astype(np.float32) / 255
+    if mask is not None:
+        # u = np.unique(mask)
+        # assert len(u) == 2 and u[0] == 0 and u[1] > 0
+        img[mask == 0] = 0
+    return torch.from_numpy(img)
+
+
+def imgs_list_to_tensors(imgs: list[np.ndarray], masks: Optional[list[np.ndarray]] = None) -> list[torch.Tensor]:
+    res = []
+    for i, img in enumerate(imgs):
+        mask = None if masks is None else masks[i]
+        res.append(img_to_tensor(img, mask))
+    return res
+
+
+def imgs_dict_to_tensors(imgs_dict: dict[str, list[np.ndarray]], masks: Optional[list[np.ndarray]] = None) -> dict[str, torch.Tensor]:
+    return {k: imgs_list_to_tensors(imgs, masks) for k, imgs in imgs_dict.items()}
 
