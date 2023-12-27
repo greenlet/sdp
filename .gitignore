@@ -163,3 +163,7 @@ cython_debug/
 # VSCode
 .vscode/
 
+
+# Custom
+data/
+

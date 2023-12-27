@@ -3,6 +3,7 @@ einops
 glfw
 imageio
 imgaug
+imutils
 jupyter
 matplotlib
 mmcv
