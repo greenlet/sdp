@@ -28,8 +28,9 @@ def create_vit(model_cfg) -> VisionTransformer:
 
     if backbone in default_cfgs:
         default_cfg = default_cfgs[backbone]
-        default_cfg = asdict(default_cfg)
-        default_cfg = default_cfg['cfgs'][default_cfg['tags'][0]]
+        # print(default_cfg)
+        # default_cfg = asdict(default_cfg)
+        # default_cfg = default_cfg['cfgs'][default_cfg['tags'][0]]
         default_cfg['hf_hub_id'] = None
     else:
         default_cfg = dict(

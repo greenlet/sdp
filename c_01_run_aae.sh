@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 
 code_path=$HOME/prog
 data_path=$HOME/data
@@ -9,6 +9,7 @@ img_size=256
 obj_id=1
 eval_batch_size=10
 device=mps
+device=cuda
 eval_mp_queue_size=5
 
 train_subdir=ds_${ds_name}_obj_${obj_id}_imsz_${img_size}_20231024_214603

@@ -1,7 +1,8 @@
-from typing import Union
+import re
+from typing import Union, Optional
 
 SplitsType = Union[int, list[int], tuple[int, ...], float, list[float], tuple[float, ...]]
-
+IntPat = re.compile(r'^\s*(\d+)\s*$')
 
 def is_iter_len(x: object) -> bool:
     return hasattr(x, '__iter__') and hasattr(x, '__len__')
@@ -71,4 +72,10 @@ def split_range(n: int, splits: SplitsType) -> list[int]:
 
     raise Exception(f'Unknown splits format: {splits}')
 
+
+def parse_int_opt(s: str) -> Optional[int]:
+    m = IntPat.match(s)
+    if not m:
+        return
+    return int(m.group(1))
 

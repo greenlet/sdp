@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 
 code_path=$HOME/prog
 data_path=$HOME/data
@@ -17,20 +17,26 @@ obj_id=1
 epochs=200
 train_epoch_steps=-1
 val_epoch_steps=-1
-train_batch_size=10
-eval_batch_size=20
+# train_epoch_steps=3
+# val_epoch_steps=2
+train_batch_size=60
+eval_batch_size=60
 device=mps
-train_mp_queue_size=3
+device=cuda
+ds_mp_pool_size=7
+train_mp_queue_size=5
 eval_mp_queue_size=5
 
 #train_subdir=last_or_new
-#train_subdir=new
-train_subdir=last
+train_subdir=new
+# train_subdir=last
 learning_rate=0.001
 
 sdp_src_path=$code_path/sdp
 segm_src_path=$code_path/lib/segmenter
-export PYTHONPATH=$PYTHONPATH:$sdp_src_path:$segm_src_path
+# export PYTHONPATH=$PYTHONPATH:$sdp_src_path:$segm_src_path
+export PYTHONPATH=$PYTHONPATH:$sdp_src_path
+# export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 
 cd "$sdp_src_path" || exit 1
 python b_01_train_aae.py \
@@ -47,6 +53,7 @@ python b_01_train_aae.py \
   --eval-batch-size $eval_batch_size \
   --device $device \
   --ds-mp-loading \
+  --ds-mp-pool-size $ds_mp_pool_size \
   --train-mp-queue-size $train_mp_queue_size \
   --eval-mp-queue-size $eval_mp_queue_size \
   --learning-rate $learning_rate

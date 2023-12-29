@@ -38,6 +38,13 @@ class ArgsAaeBase(BaseModel):
         description='Enables multiprocessing for dataset loader.',
         cli=('--ds-mp-loading',)
     )
+    ds_mp_pool_size: Optional[int] = Field(
+        None,
+        required=False,
+        description='Number of processes in multiprocess pool when DS_MP_LOADING = true. Default value is the total '
+                    'number of cores on the machine.',
+        cli=('--ds-mp-pool-size',)
+    )
     eval_mp_queue_size: int = Field(
         5,
         required=False,
@@ -128,7 +135,8 @@ def img_to_tensor(img: np.ndarray, mask: Optional[np.ndarray] = None) -> torch.T
         # u = np.unique(mask)
         # assert len(u) == 2 and u[0] == 0 and u[1] > 0
         img[mask == 0] = 0
-    return torch.from_numpy(img)
+    res: torch.Tensor = torch.from_numpy(img)
+    return res
 
 
 def imgs_list_to_tensors(imgs: list[np.ndarray], masks: Optional[list[np.ndarray]] = None) -> list[torch.Tensor]:
@@ -139,6 +147,6 @@ def imgs_list_to_tensors(imgs: list[np.ndarray], masks: Optional[list[np.ndarray
     return res
 
 
-def imgs_dict_to_tensors(imgs_dict: dict[str, list[np.ndarray]], masks: Optional[list[np.ndarray]] = None) -> dict[str, torch.Tensor]:
+def imgs_dict_to_tensors(imgs_dict: dict[str, list[np.ndarray]], masks: Optional[list[np.ndarray]] = None) -> dict[str, list[torch.Tensor]]:
     return {k: imgs_list_to_tensors(imgs, masks) for k, imgs in imgs_dict.items()}
 

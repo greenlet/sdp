@@ -13,7 +13,7 @@ from typing import Optional, Any
 from sdp.ds.bop_dataset import BopDataset, AUGNAME_DEFAULT
 from sdp.models.segmenter.factory import create_segmenter
 from sdp.utils.tensor import stack_imgs_maps
-from sdp.utils.train import MeanWin, ArgsAaeBase, ConfigAaeTrain
+from sdp.utils.train import MeanWin, ArgsAaeBase, ConfigAaeTrain, imgs_dict_to_tensors, imgs_list_to_tensors
 from segm.optim.factory import create_optimizer, create_scheduler
 
 
@@ -301,13 +301,16 @@ def main(args: ArgsAaeTrain) -> int:
     print(f'Pytorch device: {device}')
     skip_cache = False
     ds = BopDataset.from_dir(tcfg.bop_root_path, tcfg.dataset_name, shuffle=True, skip_cache=skip_cache)
-    objs_view = ds.get_objs_view(tcfg.obj_id, tcfg.train_batch_size, tcfg.img_size, return_tensors=True,
+    ds.set_mp_pool_size(args.ds_mp_pool_size)
+
+    objs_view = ds.get_objs_view(tcfg.obj_id, out_size=tcfg.img_size, return_tensors=True,
                                  keep_source_images=False, keep_cropped_images=False)
     ov_train, ov_val = objs_view.split((-1, 0.1))
+    ov_train.set_batch_size(tcfg.train_batch_size)
     ov_val.set_batch_size(tcfg.eval_batch_size)
     ov_train.set_aug_name(AUGNAME_DEFAULT)
-    n_train, n_val = len(ov_train), len(ov_val)
-    n_train_batches, n_val_batches = n_train, n_val
+
+    n_train_batches, n_val_batches = ov_train.n_batches(), ov_val.n_batches()
     if tcfg.train_epoch_steps > 0:
         n_train_batches = tcfg.train_epoch_steps
     if tcfg.val_epoch_steps > 0:
@@ -377,9 +380,10 @@ def main(args: ArgsAaeTrain) -> int:
         shuffle_between_loops=True,
         multiprocess=args.ds_mp_loading,
         mp_queue_size=args.train_mp_queue_size,
-        return_tensors=True,
+        aug_name=AUGNAME_DEFAULT,
+        return_tensors=False,
         keep_source_images=False,
-        keep_cropped_images=False,
+        keep_cropped_images=True,
     )
     val_it = ov_val.get_batch_iterator(
         n_batches=n_val_batches * epochs_left,
@@ -387,9 +391,9 @@ def main(args: ArgsAaeTrain) -> int:
         shuffle_between_loops=True,
         multiprocess=args.ds_mp_loading,
         mp_queue_size=args.eval_mp_queue_size,
-        return_tensors=True,
+        return_tensors=False,
         keep_source_images=False,
-        keep_cropped_images=False,
+        keep_cropped_images=True
     )
 
     tbsw = tb.SummaryWriter(log_dir=str(tcfg.train_path))
@@ -401,6 +405,8 @@ def main(args: ArgsAaeTrain) -> int:
         train_loss_win = MeanWin(5)
         for step in pbar:
             gt_item = next(train_it)
+            gt_item.imgs_crop_tn = imgs_list_to_tensors(gt_item.imgs_crop, gt_item.masks_crop)
+            gt_item.maps_crop_tn = imgs_dict_to_tensors(gt_item.maps_crop, gt_item.masks_crop)
             x = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names, gt_item.imgs_crop_tn)
             y_gt = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names)
             x, y_gt = x.to(device), y_gt.to(device)
@@ -427,12 +433,18 @@ def main(args: ArgsAaeTrain) -> int:
         tbsw.add_scalar('Loss/Train', train_loss_win.avg(), epoch)
         lr = optimizer.param_groups[0]['lr']
         tbsw.add_scalar('Params/LearningRate', lr, epoch)
+        if args.device == 'cuda':
+            print('Empty!!!')
+            torch.cuda.empty_cache()
 
         pbar = trange(n_val_batches, desc=f'Epoch {epoch}. Val', unit='batch')
         model.eval()
         val_loss_avg = 0
+
         for step in pbar:
             gt_item = next(val_it)
+            gt_item.imgs_crop_tn = imgs_list_to_tensors(gt_item.imgs_crop, gt_item.masks_crop)
+            gt_item.maps_crop_tn = imgs_dict_to_tensors(gt_item.maps_crop, gt_item.masks_crop)
             x = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names, gt_item.imgs_crop_tn)
             y_gt = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names)
             x, y_gt = x.to(device), y_gt.to(device)
@@ -448,6 +460,9 @@ def main(args: ArgsAaeTrain) -> int:
         pbar.close()
         val_loss_avg /= n_val_batches
         tbsw.add_scalar('Loss/Val', val_loss_avg, epoch)
+        if args.device == 'cuda':
+            print('Empty!!!')
+            torch.cuda.empty_cache()
 
         print(f'Train loss: {train_loss_win.avg():.6f}. Val loss: {val_loss_avg:.6f}')
         best = False

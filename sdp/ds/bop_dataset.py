@@ -12,7 +12,7 @@ import pandas as pd
 
 from sdp.ds.batch_processor import BatchProcessor
 from sdp.ds.bop_data import read_scene_camera, read_scene_gt, read_scene_gt_info, id_to_str
-from sdp.utils.common import SplitsType, split_range
+from sdp.utils.common import SplitsType, split_range, parse_int_opt
 from sdp.utils.data import read_yaml, write_yaml
 from sdp.utils.img import crop_apply_mask
 from sdp.utils.train import imgs_list_to_tensors, imgs_dict_to_tensors
@@ -65,12 +65,12 @@ class GtImgsMasks:
     bboxes_ltwh_src: list[np.ndarray]
     ratios_src_to_dst: list[float]
     imgs_crop_tn: list[torch.Tensor]
-    maps_crop_tn: dict[str, torch.Tensor]
+    maps_crop_tn: dict[str, list[torch.Tensor]]
 
     def __init__(self, df_img: pd.DataFrame, df_obj: pd.DataFrame, imgs: ImgsList, masks: ImgsList, maps_names: list[str],
                  maps: MapsDict, imgs_crop: Optional[ImgsList] = None, masks_crop: Optional[ImgsList] = None,
                  maps_crop: Optional[MapsDict] = None, bboxes_ltwh_src: Optional[list[np.ndarray]] = None, ratios_src_to_dst: Optional[list[float]] = None,
-                 imgs_crop_tn: Optional[list[torch.Tensor]] = None, maps_crop_tn: Optional[dict[str, torch.Tensor]] = None):
+                 imgs_crop_tn: Optional[list[torch.Tensor]] = None, maps_crop_tn: Optional[dict[str, list[torch.Tensor]]] = None):
         self.df_img = df_img
         self.df_obj = df_obj
         self.imgs = imgs
@@ -83,7 +83,7 @@ class GtImgsMasks:
         self.bboxes_ltwh_src = bboxes_ltwh_src or []
         self.ratios_src_to_dst = ratios_src_to_dst or []
         self.imgs_crop_tn = imgs_crop_tn or []
-        self.maps_crop_tn = maps_crop_tn or []
+        self.maps_crop_tn = maps_crop_tn or {}
 
     def crop(self, patch_sz: int, offset: float = 0.05):
         img_id_to_ind = {self.df_img.index[i]: i for i in range(len(self.df_img))}
@@ -248,6 +248,11 @@ class BopView:
 
     def __len__(self):
         return len(self.ids)
+
+    def n_batches(self, batch_size: Optional[int] = None):
+        batch_size = batch_size or self.batch_size
+        n = len(self.ids)
+        return n // batch_size + min(n % batch_size, 1)
 
     def _get_img_obj_rows(self, inds: IndsList, is_ids: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, Optional[int]]:
         raise Exception('Unimplemented')
@@ -461,6 +466,7 @@ class BopDataset:
     maps_names: list[str]
 
     pool: Optional[mpr.Pool] = None
+    pool_size: Optional[int] = None
     pool_refcount = 0
 
     def __init__(self, bop_path: Path, ds_name: str, ds_subdir: str, df_img: pd.DataFrame, df_obj: pd.DataFrame, shuffled: bool,
@@ -616,7 +622,9 @@ class BopDataset:
         scenes_paths.sort()
         img_ds_id, obj_ds_id = 0, 0
         for scene_path in scenes_paths:
-            scene_id = int(scene_path.name)
+            scene_id = parse_int_opt(scene_path.name)
+            if scene_id is None:
+                continue
             camera_fpath = scene_path / 'scene_camera.json'
             gt_fpath = scene_path / 'scene_gt.json'
             gt_info_fpath = scene_path / 'scene_gt_info.json'
@@ -703,9 +711,12 @@ class BopDataset:
     def get_scene_path(self, scene_id: int) -> Path:
         return self.bop_path / self.ds_name / self.ds_subdir / id_to_str(scene_id)
 
+    def set_mp_pool_size(self, pool_size: Optional[int]):
+        self.pool_size = pool_size
+
     def acquire_pool(self) -> mpr.Pool:
         if self.pool_refcount == 0:
-            self.pool = mpr.Pool()
+            self.pool = mpr.Pool(self.pool_size)
         self.pool_refcount += 1
         return self.pool
 

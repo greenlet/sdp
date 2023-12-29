@@ -1,5 +1,7 @@
 import multiprocessing as mpr
+import pickle
 import threading as thr
+import time
 import traceback as tb
 from typing import Optional, Generator, Callable, Any, Generic, TypeVar, Iterator
 
@@ -38,7 +40,8 @@ class BatchResultContainer(Generic[TBatchResult]):
 def process_batch(params_cont: BatchParamsContainer) -> BatchResultContainer:
     try:
         result = params_cont.worker_fn(params_cont.params)
-        return BatchResultContainer(params_cont.batch_id, result)
+        res_cont = BatchResultContainer(params_cont.batch_id, result)
+        return res_cont
     except Exception as ex:
         # tb_str = '\n'.join(tb.format_stack())
         tb_str = '\n'.join(tb.format_exception(ex))
@@ -58,7 +61,7 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
     cv: thr.Condition
 
     def __init__(self, worker_fn: TBatchWorker, pool: mpr.Pool, params_it: Iterator[TBatchParams],
-                 preserve_order: bool = False, queue_size: int = 3):
+                 queue_size: int, preserve_order: bool = False):
         self.worker_fn = worker_fn
         self.id_to_params = {}
         self.id_to_results = {}
@@ -71,6 +74,7 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
         self.sync_workers()
 
     def pool_cb(self, res_cont: BatchResultContainer):
+        # print(f'pool_cb. Batch id: {res_cont.batch_id}')
         if self.stopped:
             return
         self.id_to_results[res_cont.batch_id] = res_cont
@@ -95,6 +99,7 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
                 if self.next_id_in_order < 0:
                     self.next_id_in_order = params_cont.batch_id
             self.id_to_params[params_cont.batch_id] = params_cont
+            # print(f'Submit {params_cont.batch_id}')
             self.pool.apply_async(process_batch, (params_cont,), callback=self.pool_cb, error_callback=self.pool_error_cb)
 
     def __iter__(self) -> Iterator[TBatchResult]:

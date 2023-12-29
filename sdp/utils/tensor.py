@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 
 
-def stack_imgs_maps(maps: dict[str, torch.Tensor], maps_names: list[str], imgs: Optional[list[torch.Tensor]] = None) -> torch.Tensor:
+def stack_imgs_maps(maps: dict[str, list[torch.Tensor]], maps_names: list[str], imgs: Optional[list[torch.Tensor]] = None) -> torch.Tensor:
     rows = []
     n = len(maps[maps_names[0]])
     for i in range(n):
