@@ -53,6 +53,7 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
     id_to_params: dict[int, BatchParamsContainer[TBatchParams]]
     id_to_results: dict[int, BatchResultContainer[TBatchResult]]
     pool: mpr.Pool
+    pool_is_own: bool
     params_it: Iterator[TBatchParams]
     preserve_order: bool = False
     queue_size: int
@@ -60,7 +61,7 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
     stopped: bool = False
     cv: thr.Condition
 
-    def __init__(self, worker_fn: TBatchWorker, pool: mpr.Pool, params_it: Iterator[TBatchParams],
+    def __init__(self, worker_fn: TBatchWorker, pool: Optional[mpr.Pool], params_it: Iterator[TBatchParams],
                  queue_size: int, preserve_order: bool = False):
         self.worker_fn = worker_fn
         self.id_to_params = {}
@@ -131,6 +132,4 @@ class BatchProcessor(Generic[TBatchParams, TBatchResult]):
 
     def stop(self):
         self.stopped = True
-
-
 

@@ -29,7 +29,7 @@ eval_mp_queue_size=5
 
 #train_subdir=last_or_new
 train_subdir=new
-# train_subdir=last
+#train_subdir=last
 learning_rate=0.001
 
 sdp_src_path=$code_path/sdp
@@ -38,7 +38,11 @@ segm_src_path=$code_path/lib/segmenter
 export PYTHONPATH=$PYTHONPATH:$sdp_src_path
 # export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 
+dt=$(date '+%Y%m%d_%H%M%S')
+log_fpath="$train_root_path/train_${dt}.log"
+
 cd "$sdp_src_path" || exit 1
+# echo "
 python b_01_train_aae.py \
   --bop-root-path $bop_root_path \
   --train-root-path $train_root_path \
@@ -56,6 +60,7 @@ python b_01_train_aae.py \
   --ds-mp-pool-size $ds_mp_pool_size \
   --train-mp-queue-size $train_mp_queue_size \
   --eval-mp-queue-size $eval_mp_queue_size \
-  --learning-rate $learning_rate
-
+  --learning-rate $learning_rate \
+  | tee $log_fpath
+# "
 

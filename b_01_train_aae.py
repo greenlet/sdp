@@ -10,7 +10,7 @@ from pydantic_cli import run_and_exit
 from tqdm import trange
 from typing import Optional, Any
 
-from sdp.ds.bop_dataset import BopDataset, AUGNAME_DEFAULT
+from sdp.ds.bop_dataset import BopDataset, AUGNAME_DEFAULT, BopEpochIterator
 from sdp.models.segmenter.factory import create_segmenter
 from sdp.utils.tensor import stack_imgs_maps
 from sdp.utils.train import MeanWin, ArgsAaeBase, ConfigAaeTrain, imgs_dict_to_tensors, imgs_list_to_tensors
@@ -247,7 +247,7 @@ def tcfg_from_args(args: ArgsAaeTrain) -> 'ConfigAaeTrain':
 
     tcfg = ConfigAaeTrain(
         bop_root_path=args.bop_root_path,
-        train_root_path = args.train_root_path,
+        train_root_path=args.train_root_path,
         train_subdir=train_subdir.name,
         dataset_name=args.dataset_name,
         obj_id=args.obj_id,
@@ -344,7 +344,7 @@ def main(args: ArgsAaeTrain) -> int:
         'clip_grad': None,
         'sched': 'polynomial',
         'epochs': tcfg.epochs,
-        'min_lr': 1e-5,
+        'min_lr': 1e-7,
         'poly_power': 0.9,
         'poly_step_size': 1,
         'iter_max': tcfg.epochs * n_train_batches,
@@ -374,39 +374,52 @@ def main(args: ArgsAaeTrain) -> int:
         tcfg.last_epoch = checkpoint['last_epoch']
 
     epochs_left = tcfg.epochs - tcfg.last_epoch
-    train_it = ov_train.get_batch_iterator(
-        n_batches=n_train_batches * epochs_left,
-        batch_size=tcfg.train_batch_size,
-        shuffle_between_loops=True,
-        multiprocess=args.ds_mp_loading,
-        mp_queue_size=args.train_mp_queue_size,
-        aug_name=AUGNAME_DEFAULT,
-        return_tensors=False,
-        keep_source_images=False,
-        keep_cropped_images=True,
+    # train_it = ov_train.get_batch_iterator(
+    #     n_batches=n_train_batches * epochs_left,
+    #     batch_size=tcfg.train_batch_size,
+    #     shuffle_between_loops=True,
+    #     multiprocess=args.ds_mp_loading,
+    #     mp_queue_size=args.train_mp_queue_size,
+    #     aug_name=AUGNAME_DEFAULT,
+    #     return_tensors=False,
+    #     keep_source_images=False,
+    #     keep_cropped_images=True,
+    # )
+    # val_it = ov_val.get_batch_iterator(
+    #     n_batches=n_val_batches * epochs_left,
+    #     batch_size=tcfg.eval_batch_size,
+    #     shuffle_between_loops=True,
+    #     multiprocess=args.ds_mp_loading,
+    #     mp_queue_size=args.eval_mp_queue_size,
+    #     return_tensors=False,
+    #     keep_source_images=False,
+    #     keep_cropped_images=True
+    # )
+
+    train_epoch_it = BopEpochIterator(
+        bop_view=ov_train, n_epochs=epochs_left, n_batches_per_epoch=n_train_batches, batch_size=tcfg.train_batch_size,
+        drop_last=False, shuffle_between_loops=True, aug_name=AUGNAME_DEFAULT, multiprocess=args.ds_mp_loading,
+        mp_pool_size=args.ds_mp_pool_size, mp_queue_size=args.train_mp_queue_size,
+        return_tensors=False, keep_source_images=False, keep_cropped_images=True,
     )
-    val_it = ov_val.get_batch_iterator(
-        n_batches=n_val_batches * epochs_left,
-        batch_size=tcfg.eval_batch_size,
-        shuffle_between_loops=True,
-        multiprocess=args.ds_mp_loading,
-        mp_queue_size=args.eval_mp_queue_size,
-        return_tensors=False,
-        keep_source_images=False,
-        keep_cropped_images=True
+    val_epoch_it = BopEpochIterator(
+        bop_view=ov_val, n_epochs=epochs_left, n_batches_per_epoch=n_val_batches, batch_size=tcfg.eval_batch_size,
+        drop_last=False, shuffle_between_loops=True, multiprocess=args.ds_mp_loading,
+        mp_pool_size=args.ds_mp_pool_size, mp_queue_size=args.eval_mp_queue_size,
+        return_tensors=False, keep_source_images=False, keep_cropped_images=True,
     )
 
     tbsw = tb.SummaryWriter(log_dir=str(tcfg.train_path))
     num_updates = 0
     val_loss = None
     for epoch in range(tcfg.last_epoch + 1, tcfg.epochs + 1):
+        train_it = iter(train_epoch_it.get_batch_iterator())
         pbar = trange(n_train_batches, desc=f'Epoch {epoch}', unit='batch')
         model.train()
         train_loss_win = MeanWin(5)
         for step in pbar:
             gt_item = next(train_it)
-            gt_item.imgs_crop_tn = imgs_list_to_tensors(gt_item.imgs_crop, gt_item.masks_crop)
-            gt_item.maps_crop_tn = imgs_dict_to_tensors(gt_item.maps_crop, gt_item.masks_crop)
+            gt_item.to_tensors()
             x = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names, gt_item.imgs_crop_tn)
             y_gt = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names)
             x, y_gt = x.to(device), y_gt.to(device)
@@ -434,17 +447,15 @@ def main(args: ArgsAaeTrain) -> int:
         lr = optimizer.param_groups[0]['lr']
         tbsw.add_scalar('Params/LearningRate', lr, epoch)
         if args.device == 'cuda':
-            print('Empty!!!')
             torch.cuda.empty_cache()
 
         pbar = trange(n_val_batches, desc=f'Epoch {epoch}. Val', unit='batch')
         model.eval()
         val_loss_avg = 0
-
+        val_it = iter(val_epoch_it.get_batch_iterator())
         for step in pbar:
             gt_item = next(val_it)
-            gt_item.imgs_crop_tn = imgs_list_to_tensors(gt_item.imgs_crop, gt_item.masks_crop)
-            gt_item.maps_crop_tn = imgs_dict_to_tensors(gt_item.maps_crop, gt_item.masks_crop)
+            gt_item.to_tensors()
             x = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names, gt_item.imgs_crop_tn)
             y_gt = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names)
             x, y_gt = x.to(device), y_gt.to(device)
@@ -461,7 +472,6 @@ def main(args: ArgsAaeTrain) -> int:
         val_loss_avg /= n_val_batches
         tbsw.add_scalar('Loss/Val', val_loss_avg, epoch)
         if args.device == 'cuda':
-            print('Empty!!!')
             torch.cuda.empty_cache()
 
         print(f'Train loss: {train_loss_win.avg():.6f}. Val loss: {val_loss_avg:.6f}')
