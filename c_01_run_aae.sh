@@ -7,12 +7,13 @@ train_root_path=$data_path/train_aae
 ds_name=itodd
 img_size=256
 obj_id=1
-eval_batch_size=10
+eval_batch_size=50
 device=mps
 device=cuda
 eval_mp_queue_size=5
 
-train_subdir=ds_${ds_name}_obj_${obj_id}_imsz_${img_size}_20231024_214603
+#train_subdir=ds_${ds_name}_obj_${obj_id}_imsz_${img_size}_20231024_214603
+train_subdir=ds_${ds_name}_obj_${obj_id}_imsz_${img_size}_20240112_232615
 
 sdp_src_path=$code_path/sdp
 segm_src_path=$code_path/lib/segmenter

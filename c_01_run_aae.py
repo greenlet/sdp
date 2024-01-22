@@ -7,7 +7,7 @@ from pydantic_cli import run_and_exit
 from tqdm import trange
 from typing import Optional
 
-from sdp.ds.bop_dataset import BopDataset
+from sdp.ds.bop_dataset import BopDataset, BopEpochIterator
 from sdp.ds.emb_dataset import EmbDataset
 from sdp.models.segmenter.factory import create_vit
 from sdp.utils.tensor import stack_imgs_maps
@@ -74,19 +74,24 @@ def main(args: ArgsAaeRun) -> int:
     encoder.load_state_dict(checkpoint['model'], strict=False)
 
     n_items = len(objs_view)
-    n_batches = n_items // tcfg.eval_batch_size + min(n_items % tcfg.eval_batch_size, 1)
+    n_batches = objs_view.n_batches()
     # n_batches = 10
-    val_it = objs_view.get_batch_iterator(
-        n_batches=n_batches,
-        batch_size=tcfg.eval_batch_size,
-        multiprocess=args.ds_mp_loading,
-        mp_queue_size=args.eval_mp_queue_size,
-        return_tensors=True,
-        keep_source_images=False,
-        keep_cropped_images=False,
-        drop_last=False,
+    # val_it = objs_view.get_batch_iterator(
+    #     n_batches=n_batches,
+    #     batch_size=tcfg.eval_batch_size,
+    #     multiprocess=args.ds_mp_loading,
+    #     mp_queue_size=args.eval_mp_queue_size,
+    #     return_tensors=True,
+    #     keep_source_images=False,
+    #     keep_cropped_images=False,
+    #     drop_last=False,
+    # )
+    val_epoch_it = BopEpochIterator(
+        bop_view=objs_view, n_epochs=1, n_batches_per_epoch=n_batches, batch_size=tcfg.eval_batch_size,
+        drop_last=False, shuffle_between_loops=False, multiprocess=args.ds_mp_loading,
+        mp_pool_size=args.ds_mp_pool_size, mp_queue_size=args.eval_mp_queue_size,
+        return_tensors=False, keep_source_images=False, keep_cropped_images=True,
     )
-
     pbar = trange(n_batches, desc=f'Eval', unit='batch')
     encoder.eval()
 
@@ -96,13 +101,15 @@ def main(args: ArgsAaeRun) -> int:
     embs = np.empty((n_items, emb_sz), np.float32)
 
     off = 0
+    val_it = iter(val_epoch_it.get_batch_iterator())
     for step in pbar:
         gt_item = next(val_it)
+        gt_item.to_tensors()
         x = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names, gt_item.imgs_crop_tn)
         x = x.to(device)
         y = encoder.forward(x)
         y = y.detach().to('cpu')
-        inds = slice(off, off + y.shape[0])
+        inds = slice(off, min(off + y.shape[0], obj_ds_ids.shape[0]))
         obj_ds_ids[inds] = gt_item.df_obj.index
         embs[inds] = y
         off += y.shape[0]
@@ -110,7 +117,7 @@ def main(args: ArgsAaeRun) -> int:
     assert set(objs_view.ids[:n_batches * tcfg.eval_batch_size]) == set(obj_ds_ids)
 
     pbar.close()
-    val_it.close()
+    del val_it
 
     out_path = ds.get_ds_path() / tcfg.train_subdir
     os.makedirs(out_path, exist_ok=True)

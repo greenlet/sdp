@@ -441,6 +441,7 @@ def main(args: ArgsAaeTrain) -> int:
             elif step == n_train_batches - 1:
                 img_vis = tile_images(x, y_pred, len(gt_item.maps_names))
                 tbsw.add_image('Img/Train', img_vis, epoch)
+        del train_it
 
         pbar.close()
         tbsw.add_scalar('Loss/Train', train_loss_win.avg(), epoch)
@@ -467,6 +468,7 @@ def main(args: ArgsAaeTrain) -> int:
             if step == n_val_batches - 1:
                 img_vis = tile_images(x, y_pred, len(gt_item.maps_names))
                 tbsw.add_image('Img/Val', img_vis, epoch)
+        del val_it
 
         pbar.close()
         val_loss_avg /= n_val_batches
@@ -474,7 +476,8 @@ def main(args: ArgsAaeTrain) -> int:
         if args.device == 'cuda':
             torch.cuda.empty_cache()
 
-        print(f'Train loss: {train_loss_win.avg():.6f}. Val loss: {val_loss_avg:.6f}')
+        print(f'Train loss: {train_loss_win.avg():.6f}. Val loss: {val_loss_avg:.6f}'
+              )
         best = False
         if val_loss is None or val_loss_avg < val_loss:
             val_loss_str = f'{val_loss}' if val_loss is None else f'{val_loss:.6f}'

@@ -411,7 +411,7 @@ class BopEpochIterator:
         last_batch = False
         if self.i_batch == self.n_batches_div:
             inds = list(range(i0, i0 + self.mod_batch_sz))
-            if self.n_batches_div:
+            if self.n_batches_div and self.i_epoch < self.n_epochs - 1:
                 inds += list(range(self.batch_size - self.mod_batch_sz))
             last_batch = True
         else:
