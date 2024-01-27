@@ -314,7 +314,6 @@ def main(args: ArgsAaeTrain) -> int:
     print(f'Pytorch device: {device}')
     skip_cache = False
     ds = BopDataset.from_dir(tcfg.bop_root_path, tcfg.dataset_name, shuffle=True, skip_cache=skip_cache)
-    ds.set_mp_pool_size(args.ds_mp_pool_size)
 
     objs_view = ds.get_objs_view(tcfg.obj_id, out_size=tcfg.img_size, return_tensors=True,
                                  keep_source_images=False, keep_cropped_images=False)
@@ -394,27 +393,6 @@ def main(args: ArgsAaeTrain) -> int:
         tcfg.last_epoch = checkpoint['last_epoch']
 
     epochs_left = tcfg.epochs - tcfg.last_epoch
-    # train_it = ov_train.get_batch_iterator(
-    #     n_batches=n_train_batches * epochs_left,
-    #     batch_size=tcfg.train_batch_size,
-    #     shuffle_between_loops=True,
-    #     multiprocess=args.ds_mp_loading,
-    #     mp_queue_size=args.train_mp_queue_size,
-    #     aug_name=AUGNAME_DEFAULT,
-    #     return_tensors=False,
-    #     keep_source_images=False,
-    #     keep_cropped_images=True,
-    # )
-    # val_it = ov_val.get_batch_iterator(
-    #     n_batches=n_val_batches * epochs_left,
-    #     batch_size=tcfg.eval_batch_size,
-    #     shuffle_between_loops=True,
-    #     multiprocess=args.ds_mp_loading,
-    #     mp_queue_size=args.eval_mp_queue_size,
-    #     return_tensors=False,
-    #     keep_source_images=False,
-    #     keep_cropped_images=True
-    # )
 
     train_epoch_it = BopEpochIterator(
         bop_view=ov_train, n_epochs=epochs_left, n_batches_per_epoch=n_train_batches, batch_size=tcfg.train_batch_size,
@@ -527,8 +505,6 @@ def main(args: ArgsAaeTrain) -> int:
             print(f'New val loss minimum: {val_loss_avg:.6f}. Saving checkpoint to {tcfg.best_checkpoint_fpath}')
             shutil.copyfile(tcfg.last_checkpoint_fpath, tcfg.best_checkpoint_fpath)
 
-    # train_it.close()
-    # val_it.close()
     return 0
 
 

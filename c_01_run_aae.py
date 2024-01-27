@@ -75,23 +75,14 @@ def main(args: ArgsAaeRun) -> int:
 
     n_items = len(objs_view)
     n_batches = objs_view.n_batches()
-    # n_batches = 10
-    # val_it = objs_view.get_batch_iterator(
-    #     n_batches=n_batches,
-    #     batch_size=tcfg.eval_batch_size,
-    #     multiprocess=args.ds_mp_loading,
-    #     mp_queue_size=args.eval_mp_queue_size,
-    #     return_tensors=True,
-    #     keep_source_images=False,
-    #     keep_cropped_images=False,
-    #     drop_last=False,
-    # )
+
     val_epoch_it = BopEpochIterator(
         bop_view=objs_view, n_epochs=1, n_batches_per_epoch=n_batches, batch_size=tcfg.eval_batch_size,
         drop_last=False, shuffle_between_loops=False, multiprocess=args.ds_mp_loading,
         mp_pool_size=args.ds_mp_pool_size, mp_queue_size=args.eval_mp_queue_size,
         return_tensors=False, keep_source_images=False, keep_cropped_images=True,
     )
+
     pbar = trange(n_batches, desc=f'Eval', unit='batch')
     encoder.eval()
 

@@ -7,7 +7,7 @@ import sys
 import numpy as np
 
 from sdp.ds.bop_data import BopModelsInfo, read_models_info, id_to_str, read_meshes
-from sdp.ds.bop_dataset import BopDataset, AUGNAME_DEFAULT
+from sdp.ds.bop_dataset import BopDataset, AUGNAME_DEFAULT, BopEpochIterator
 from sdp.utils.img import crop_apply_mask
 
 DATA_PATH = Path(os.path.expandvars('$HOME/data'))
@@ -32,10 +32,13 @@ def demo_01_mp():
     batch_size = 50
     mp_queue_size = 5
     mp_pool_size = 7
-    ds.set_mp_pool_size(mp_pool_size)
-    batch_it = ov.get_batch_iterator(
-        n_batches, batch_size=batch_size, multiprocess=multiprocess, mp_queue_size=mp_queue_size, aug_name=aug_name,
-        return_tensors=return_tensors, keep_source_images=keep_source_mages, keep_cropped_images=keep_cropped_images)
+    epoch_it = BopEpochIterator(
+        bop_view=ov, n_epochs=1, n_batches_per_epoch=n_batches, batch_size=batch_size,
+        drop_last=False, shuffle_between_loops=True, aug_name=AUGNAME_DEFAULT, multiprocess=True,
+        mp_pool_size=mp_pool_size, mp_queue_size=mp_queue_size,
+        return_tensors=return_tensors, keep_source_images=keep_source_mages, keep_cropped_images=keep_cropped_images,
+    )
+    batch_it = iter(epoch_it.get_batch_iterator())
 
     t1 = datetime.now()
     n = 50

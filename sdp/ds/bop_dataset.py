@@ -296,65 +296,6 @@ class BopView:
         i = i_batch * self.batch_size
         return self.get_gt_imgs_masks(i, self.batch_size)
 
-    def get_batch_iterator(self, n_batches: Optional[int] = None, multiprocess: bool = False, batch_size: Optional[int] = None,
-                           drop_last: bool = False, shuffle_between_loops: bool = True, mp_queue_size: int = 3, aug_name: Optional[str] = None,
-                           return_tensors: Optional[bool] = None, keep_source_images: Optional[bool] = None, keep_cropped_images: Optional[bool] = None)\
-            -> Generator[GtImgsMasks, None, None]:
-        batch_size = batch_size or self.batch_size
-        n = len(self.ids)
-        n_batches_total = n // batch_size + min(n % batch_size, 1)
-
-        info = f'n = {n}. batch_size = {batch_size}. n_batches = {n_batches}. n_batches_total = {n_batches_total}'
-        assert n_batches_total > 0, info
-        assert n_batches is None or n_batches > 0, info
-
-        looped = False
-        if n_batches is None:
-            n_batches = n_batches_total
-        if n_batches > n_batches_total:
-            looped = True
-
-        def batch_gen() -> Generator[ImgsObjsGtParams, None, None]:
-            for i_batch in range(n_batches):
-                i = i_batch * batch_size
-                if i >= n:
-                    if shuffle_between_loops:
-                        np.random.shuffle(self.ids)
-                        i = 0
-                    else:
-                        i %= n
-                batch_size_cur = min(batch_size, n - i)
-                inds = range(i, i + batch_size_cur)
-                if batch_size_cur < batch_size:
-                    if not looped:
-                        if drop_last:
-                            return
-                    else:
-                        rest = batch_size - batch_size_cur
-                        inds = list(range(i, n)) + list(range(rest))
-                params = self.get_gt_task_params(
-                    inds, aug_name=aug_name, return_tensors=return_tensors,
-                    keep_source_images=keep_source_images, keep_cropped_images=keep_cropped_images)
-                yield params
-
-        batch_it = iter(batch_gen())
-        if multiprocess:
-            pool = self.ds.acquire_pool()
-            bproc = BatchProcessor(load_imgs_objs_gt, pool, batch_it, queue_size=mp_queue_size)
-            try:
-                for res in bproc:
-                    yield res
-            # Covered by finally. Left here for reference.
-            # except GeneratorExit:
-            #     bproc.stop()
-            finally:
-                bproc.stop()
-                self.ds.release_pool()
-        else:
-            for params in batch_it:
-                res = load_imgs_objs_gt(params)
-                yield res
-
 
 class BopEpochIterator:
     bop_view: BopView
@@ -463,6 +404,8 @@ class BopBatchIterator:
             finally:
                 bproc.stop()
                 pool.terminate()
+                del bproc
+                del pool
         else:
             for params in batch_it:
                 res = load_imgs_objs_gt(params)
@@ -595,10 +538,6 @@ class BopDataset:
     df_obj: pd.DataFrame
     shuffled: bool
     maps_names: list[str]
-
-    pool: Optional[mpr.Pool] = None
-    pool_size: Optional[int] = None
-    pool_refcount = 0
 
     def __init__(self, bop_path: Path, ds_name: str, ds_subdir: str, df_img: pd.DataFrame, df_obj: pd.DataFrame, shuffled: bool,
                  maps_names: tuple[str] = ('norm', 'noc')) -> None:
@@ -841,20 +780,4 @@ class BopDataset:
 
     def get_scene_path(self, scene_id: int) -> Path:
         return self.bop_path / self.ds_name / self.ds_subdir / id_to_str(scene_id)
-
-    def set_mp_pool_size(self, pool_size: Optional[int]):
-        self.pool_size = pool_size
-
-    def acquire_pool(self) -> mpr.Pool:
-        if self.pool_refcount == 0:
-            self.pool = mpr.Pool(self.pool_size)
-        self.pool_refcount += 1
-        return self.pool
-
-    def release_pool(self):
-        if self.pool_refcount > 0:
-            self.pool_refcount -= 1
-            if self.pool_refcount == 0:
-                self.pool.terminate()
-                self.pool = None
 

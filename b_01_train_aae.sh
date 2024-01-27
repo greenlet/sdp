@@ -28,8 +28,8 @@ train_mp_queue_size=5
 eval_mp_queue_size=5
 
 #train_subdir=last_or_new
-train_subdir=new
-# train_subdir=last
+# train_subdir=new
+train_subdir=last
 learning_rate=0.001
 
 sdp_src_path=$code_path/sdp
