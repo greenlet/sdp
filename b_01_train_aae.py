@@ -1,4 +1,5 @@
 import argparse
+from contextlib import suppress
 import re
 import shutil
 import torch
@@ -15,6 +16,7 @@ from sdp.models.segmenter.factory import create_segmenter
 from sdp.utils.tensor import stack_imgs_maps
 from sdp.utils.train import MeanWin, ArgsAaeBase, ConfigAaeTrain, imgs_dict_to_tensors, imgs_list_to_tensors
 from segm.optim.factory import create_optimizer, create_scheduler
+from timm.utils import NativeScaler
 
 
 class TrainSubdirType(str, Enum):
@@ -289,6 +291,17 @@ def tile_images(imgs_gt: torch.Tensor, imgs_pred: torch.Tensor, n_maps: int, max
     return res
 
 
+class MaskedMseLoss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, mask: torch.Tensor, y_pred: torch.Tensor, y_gt: torch.Tensor) -> torch.Tensor:
+        nmask = ~mask
+        loss_obj = (y_pred[mask] - y_gt[mask]).square().mean()
+        loss_back = (y_pred[nmask] - y_gt[nmask]).square().mean()
+        return loss_obj + loss_back
+
+
 def main(args: ArgsAaeTrain) -> int:
     args.train_root_path.mkdir(parents=True, exist_ok=True)
     tcfg = tcfg_from_args(args)
@@ -344,7 +357,7 @@ def main(args: ArgsAaeTrain) -> int:
         'clip_grad': None,
         'sched': 'polynomial',
         'epochs': tcfg.epochs,
-        'min_lr': 1e-7,
+        'min_lr': 1e-6,
         'poly_power': 0.9,
         'poly_step_size': 1,
         'iter_max': tcfg.epochs * n_train_batches,
@@ -361,8 +374,15 @@ def main(args: ArgsAaeTrain) -> int:
 
     optimizer = create_optimizer(opt_args, model)
     lr_scheduler = create_scheduler(opt_args, optimizer)
+    # criterion = torch.nn.MSELoss()
     # criterion = torch.nn.CrossEntropyLoss()
-    criterion = torch.nn.MSELoss()
+    criterion = MaskedMseLoss()
+    amp = False
+    amp_autocast = suppress
+    loss_scaler = None
+    if amp:
+        amp_autocast = torch.cuda.amp.autocast
+        loss_scaler = NativeScaler()
 
     if tcfg.last_checkpoint_fpath.exists():
         print(f'Loading checkpoint from {tcfg.last_checkpoint_fpath}')
@@ -423,8 +443,12 @@ def main(args: ArgsAaeTrain) -> int:
             x = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names, gt_item.imgs_crop_tn)
             y_gt = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names)
             x, y_gt = x.to(device), y_gt.to(device)
-            y_pred = model.forward(x)
-            loss: torch.Tensor = criterion(y_pred, y_gt)
+            with amp_autocast():
+                y_pred = model.forward(x)
+                # y_pred = torch.sigmoid(y_pred)
+                y_pred = (y_pred + 1) / 2
+                # loss: torch.Tensor = criterion(y_pred, y_gt)
+                loss: torch.Tensor = criterion(x[:, :6, ...] > 0, y_pred, y_gt)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -460,8 +484,12 @@ def main(args: ArgsAaeTrain) -> int:
             x = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names, gt_item.imgs_crop_tn)
             y_gt = stack_imgs_maps(gt_item.maps_crop_tn, gt_item.maps_names)
             x, y_gt = x.to(device), y_gt.to(device)
-            y_pred = model.forward(x)
-            loss: torch.Tensor = criterion(y_pred, y_gt)
+            with amp_autocast():
+                y_pred = model.forward(x)
+                # y_pred = torch.sigmoid(y_pred)
+                y_pred = (y_pred + 1) / 2
+                # loss: torch.Tensor = criterion(y_pred, y_gt)
+                loss: torch.Tensor = criterion(x[:, :6, ...] > 0, y_pred, y_gt)
             pbar.set_postfix_str(f'Val. loss: {loss.item():.6f}')
             val_loss_avg += loss.item()
 
@@ -499,8 +527,8 @@ def main(args: ArgsAaeTrain) -> int:
             print(f'New val loss minimum: {val_loss_avg:.6f}. Saving checkpoint to {tcfg.best_checkpoint_fpath}')
             shutil.copyfile(tcfg.last_checkpoint_fpath, tcfg.best_checkpoint_fpath)
 
-    train_it.close()
-    val_it.close()
+    # train_it.close()
+    # val_it.close()
     return 0
 
 

@@ -109,6 +109,7 @@ def main(args: ArgsAaeRun) -> int:
         x = x.to(device)
         y = encoder.forward(x)
         y = y.detach().to('cpu')
+        # print(y.shape, np.linalg.norm(y[0] - y[1]), np.linalg.norm(y[0] - y[2]))
         inds = slice(off, min(off + y.shape[0], obj_ds_ids.shape[0]))
         obj_ds_ids[inds] = gt_item.df_obj.index
         embs[inds] = y
@@ -127,6 +128,14 @@ def main(args: ArgsAaeRun) -> int:
     emb_data_path = cache_path / tcfg.train_subdir
     emb_ds = EmbDataset(emb_data_path, tcfg, obj_ds_ids, embs)
     emb_ds.write_cache()
+
+    # emb_ds1 = EmbDataset.read_cache(emb_data_path)
+    # print('embs1:', embs.shape, embs.dtype)
+    # print('ids1:', obj_ds_ids.shape, obj_ds_ids.dtype)
+    # print('embs2:', emb_ds1.embs.shape, emb_ds1.embs.dtype)
+    # print('ids2:', emb_ds1.obj_ds_ids.shape, emb_ds1.obj_ds_ids.dtype)
+    # print('embs close:', np.allclose(embs, emb_ds1.embs))
+    # print('ids close:', np.allclose(obj_ds_ids, emb_ds1.obj_ds_ids))
 
     return 0
 

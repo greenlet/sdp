@@ -14,7 +14,7 @@ obj_id=1
 #train_batch_size=5
 #eval_batch_size=5
 #device=mps
-epochs=400
+epochs=250
 train_epoch_steps=-1
 val_epoch_steps=-1
 # train_epoch_steps=3
@@ -28,8 +28,8 @@ train_mp_queue_size=5
 eval_mp_queue_size=5
 
 #train_subdir=last_or_new
-# train_subdir=new
-train_subdir=last
+train_subdir=new
+# train_subdir=last
 learning_rate=0.001
 
 sdp_src_path=$code_path/sdp

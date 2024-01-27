@@ -13,7 +13,8 @@ device=cuda
 eval_mp_queue_size=5
 
 #train_subdir=ds_${ds_name}_obj_${obj_id}_imsz_${img_size}_20231024_214603
-train_subdir=ds_${ds_name}_obj_${obj_id}_imsz_${img_size}_20240112_232615
+# train_subdir=ds_${ds_name}_obj_${obj_id}_imsz_${img_size}_20240112_232615
+train_subdir=ds_${ds_name}_obj_${obj_id}_imsz_${img_size}_20240123_230629
 
 sdp_src_path=$code_path/sdp
 segm_src_path=$code_path/lib/segmenter
